@@ -6,16 +6,44 @@ import {
   NodeOperationError,
 } from 'n8n-workflow';
 import ytdl from '@distube/ytdl-core';
-import { HttpsProxyAgent } from 'https-proxy-agent';
-import { SocksProxyAgent } from 'socks-proxy-agent';
 
-function createProxyAgent(proxyUrl: string): HttpsProxyAgent<string> | SocksProxyAgent | undefined {
-  if (!proxyUrl) return undefined;
-  
-  if (proxyUrl.startsWith('socks')) {
-    return new SocksProxyAgent(proxyUrl);
+async function buildAgent(
+  context: IExecuteFunctions,
+  itemIndex: number,
+): Promise<ReturnType<typeof ytdl.createAgent>> {
+  const useProxy = context.getNodeParameter('useProxy', itemIndex) as boolean;
+  const proxyUrl = useProxy
+    ? (context.getNodeParameter('proxyUrl', itemIndex) as string)
+    : undefined;
+
+  let cookies: any[] = [];
+  try {
+    const credentials = await context.getCredentials('youTubeDLCookies');
+    if (credentials?.cookiesJson) {
+      const parsed = JSON.parse(credentials.cookiesJson as string);
+      if (Array.isArray(parsed)) {
+        cookies = parsed;
+      }
+    }
+  } catch {
+    // No credentials configured — proceed without cookies
   }
-  return new HttpsProxyAgent(proxyUrl);
+
+  if (proxyUrl) {
+    if (proxyUrl.startsWith('socks')) {
+      throw new Error(
+        'SOCKS proxies are not supported in this version. Please use an HTTP or HTTPS proxy.',
+      );
+    }
+    try {
+      new URL(proxyUrl);
+    } catch {
+      throw new Error(`Invalid proxy URL: ${proxyUrl}`);
+    }
+    return ytdl.createProxyAgent(proxyUrl, cookies);
+  }
+
+  return ytdl.createAgent(cookies);
 }
 
 async function downloadVideo(
@@ -23,36 +51,44 @@ async function downloadVideo(
   videoUrl: string,
   videoId: string,
   itemIndex: number,
-  returnData: INodeExecutionData[]
+  returnData: INodeExecutionData[],
 ): Promise<void> {
   const videoQuality = context.getNodeParameter('videoQuality', itemIndex) as string;
   const videoFilter = context.getNodeParameter('videoFilter', itemIndex) as ytdl.Filter;
   const customFilename = context.getNodeParameter('outputFilename', itemIndex) as string;
+  const timeoutSeconds = context.getNodeParameter('timeoutSeconds', itemIndex, 300) as number;
   const useProxy = context.getNodeParameter('useProxy', itemIndex) as boolean;
-  
-  let agent: HttpsProxyAgent<string> | SocksProxyAgent | undefined;
-  if (useProxy) {
-    const proxyUrl = context.getNodeParameter('proxyUrl', itemIndex) as string;
-    agent = createProxyAgent(proxyUrl);
-  }
 
-  const info = await ytdl.getInfo(videoUrl, { agent: agent as any });
-  const filename = customFilename || 
-    `${info.videoDetails.title.replace(/[^a-z0-9]/gi, '_')}_${videoId}`;
+  const agent = await buildAgent(context, itemIndex);
+  const info = await ytdl.getInfo(videoUrl, { agent });
+  const filename =
+    customFilename || `${info.videoDetails.title.replace(/[^a-z0-9]/gi, '_')}_${videoId}`;
 
   const chunks: Buffer[] = [];
   const stream = ytdl(videoUrl, {
     quality: videoQuality as any,
     filter: videoFilter,
-    agent: agent as any,
+    agent,
   });
 
   return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      stream.destroy();
+      reject(
+        new NodeOperationError(
+          context.getNode(),
+          `Download timed out after ${timeoutSeconds} seconds`,
+          { itemIndex },
+        ),
+      );
+    }, timeoutSeconds * 1000);
+
     stream.on('data', (chunk: Buffer) => {
       chunks.push(chunk);
     });
 
     stream.on('end', () => {
+      clearTimeout(timeout);
       const buffer = Buffer.concat(chunks);
       const base64Data = buffer.toString('base64');
 
@@ -84,11 +120,12 @@ async function downloadVideo(
     });
 
     stream.on('error', (error: Error) => {
-      reject(new NodeOperationError(
-        context.getNode(),
-        `Download failed: ${error.message}`,
-        { itemIndex }
-      ));
+      clearTimeout(timeout);
+      reject(
+        new NodeOperationError(context.getNode(), `Download failed: ${error.message}`, {
+          itemIndex,
+        }),
+      );
     });
   });
 }
@@ -98,35 +135,43 @@ async function downloadAudio(
   videoUrl: string,
   videoId: string,
   itemIndex: number,
-  returnData: INodeExecutionData[]
+  returnData: INodeExecutionData[],
 ): Promise<void> {
   const audioQuality = context.getNodeParameter('audioQuality', itemIndex) as string;
   const customFilename = context.getNodeParameter('outputFilename', itemIndex) as string;
+  const timeoutSeconds = context.getNodeParameter('timeoutSeconds', itemIndex, 300) as number;
   const useProxy = context.getNodeParameter('useProxy', itemIndex) as boolean;
-  
-  let agent: HttpsProxyAgent<string> | SocksProxyAgent | undefined;
-  if (useProxy) {
-    const proxyUrl = context.getNodeParameter('proxyUrl', itemIndex) as string;
-    agent = createProxyAgent(proxyUrl);
-  }
 
-  const info = await ytdl.getInfo(videoUrl, { agent: agent as any });
-  const filename = customFilename || 
-    `${info.videoDetails.title.replace(/[^a-z0-9]/gi, '_')}_${videoId}_audio`;
+  const agent = await buildAgent(context, itemIndex);
+  const info = await ytdl.getInfo(videoUrl, { agent });
+  const filename =
+    customFilename || `${info.videoDetails.title.replace(/[^a-z0-9]/gi, '_')}_${videoId}_audio`;
 
   const chunks: Buffer[] = [];
   const stream = ytdl(videoUrl, {
     filter: 'audioonly',
     quality: audioQuality as any,
-    agent: agent as any,
+    agent,
   });
 
   return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      stream.destroy();
+      reject(
+        new NodeOperationError(
+          context.getNode(),
+          `Audio download timed out after ${timeoutSeconds} seconds`,
+          { itemIndex },
+        ),
+      );
+    }, timeoutSeconds * 1000);
+
     stream.on('data', (chunk: Buffer) => {
       chunks.push(chunk);
     });
 
     stream.on('end', () => {
+      clearTimeout(timeout);
       const buffer = Buffer.concat(chunks);
       const base64Data = buffer.toString('base64');
 
@@ -154,11 +199,12 @@ async function downloadAudio(
     });
 
     stream.on('error', (error: Error) => {
-      reject(new NodeOperationError(
-        context.getNode(),
-        `Audio download failed: ${error.message}`,
-        { itemIndex }
-      ));
+      clearTimeout(timeout);
+      reject(
+        new NodeOperationError(context.getNode(), `Audio download failed: ${error.message}`, {
+          itemIndex,
+        }),
+      );
     });
   });
 }
@@ -168,17 +214,12 @@ async function getVideoInfo(
   videoUrl: string,
   videoId: string,
   itemIndex: number,
-  returnData: INodeExecutionData[]
+  returnData: INodeExecutionData[],
 ): Promise<void> {
   const useProxy = context.getNodeParameter('useProxy', itemIndex) as boolean;
-  
-  let agent: HttpsProxyAgent<string> | SocksProxyAgent | undefined;
-  if (useProxy) {
-    const proxyUrl = context.getNodeParameter('proxyUrl', itemIndex) as string;
-    agent = createProxyAgent(proxyUrl);
-  }
 
-  const info = await ytdl.getInfo(videoUrl, { agent: agent as any });
+  const agent = await buildAgent(context, itemIndex);
+  const info = await ytdl.getInfo(videoUrl, { agent });
 
   const formats = info.formats.map(format => ({
     itag: format.itag,
@@ -235,7 +276,12 @@ export class YouTubeDL implements INodeType {
     },
     inputs: ['main'],
     outputs: ['main'],
-    credentials: [],
+    credentials: [
+      {
+        name: 'youTubeDLCookies',
+        required: false,
+      },
+    ],
     properties: [
       {
         displayName: 'Operation',
@@ -330,6 +376,18 @@ export class YouTubeDL implements INodeType {
         description: 'Custom filename (optional, extension auto-added)',
       },
       {
+        displayName: 'Timeout (Seconds)',
+        name: 'timeoutSeconds',
+        type: 'number',
+        default: 300,
+        description: 'Maximum time in seconds to wait for the download to complete',
+        displayOptions: {
+          show: {
+            operation: ['downloadVideo', 'downloadAudio'],
+          },
+        },
+      },
+      {
         displayName: 'Proxy',
         name: 'useProxy',
         type: 'boolean',
@@ -342,7 +400,7 @@ export class YouTubeDL implements INodeType {
         type: 'string',
         default: '',
         placeholder: 'http://user:pass@proxy:port',
-        description: 'Proxy URL (supports HTTP, HTTPS, SOCKS4, SOCKS5)',
+        description: 'Proxy URL (supports HTTP and HTTPS proxies)',
         displayOptions: {
           show: {
             useProxy: [true],
