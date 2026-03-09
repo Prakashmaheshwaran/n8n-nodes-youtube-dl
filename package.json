@@ -1,35 +1,33 @@
 {
   "name": "n8n-nodes-youtube-dl",
-  "version": "0.1.0",
-  "description": "n8n community node for downloading YouTube videos using ytdl-core",
+  "version": "1.0.0",
+  "description": "YouTube video/audio downloader for n8n (no binary required)",
   "keywords": [
     "n8n-community-node-package",
     "youtube",
     "download",
     "video",
-    "audio"
+    "audio",
+    "ytdl"
   ],
   "license": "MIT",
   "homepage": "https://github.com/prakashmaheshwaran/n8n-nodes-youtube-dl",
   "author": {
     "name": "Prakash Maheshwaran",
-    "email": "prakash@example.com"
+    "email": "your-email@example.com"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/prakashmaheshwaran/n8n-nodes-youtube-dl.git"
-  },
-  "bugs": {
-    "url": "https://github.com/prakashmaheshwaran/n8n-nodes-youtube-dl/issues"
   },
   "main": "index.js",
   "scripts": {
     "build": "tsc && gulp build:icons",
     "dev": "tsc --watch",
     "format": "prettier nodes --write",
-    "lint": "eslint nodes package.json --ext .ts,.json --quiet",
-    "lintfix": "eslint nodes package.json --ext .ts,.json --fix",
-    "prepublishOnly": "npm run build && npm run lint -s"
+    "lint": "eslint nodes/**/*.ts --fix",
+    "prepublishOnly": "npm run build && npm run lint -s",
+    "test": "jest"
   },
   "files": [
     "dist"
@@ -42,18 +40,16 @@
     ]
   },
   "devDependencies": {
-    "@typescript-eslint/eslint-plugin": "^6.21.0",
-    "@typescript-eslint/parser": "^6.21.0",
-    "eslint": "^8.57.0",
-    "eslint-config-prettier": "^9.1.0",
+    "@types/node": "^20.8.0",
+    "@typescript-eslint/parser": "^6.7.0",
     "eslint-plugin-n8n-nodes-base": "^1.16.0",
     "gulp": "^4.0.2",
-    "prettier": "^3.2.5",
-    "typescript": "^5.3.3"
+    "n8n-workflow": "^1.0.0",
+    "prettier": "^3.0.3",
+    "typescript": "^5.2.2"
   },
   "dependencies": {
-    "@distube/ytdl-core": "^4.13.5",
-    "n8n-workflow": "^1.29.1"
+    "@distube/ytdl-core": "^4.15.9"
   },
   "peerDependencies": {
     "n8n-workflow": "*"

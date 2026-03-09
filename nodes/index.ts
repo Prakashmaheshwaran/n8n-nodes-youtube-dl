@@ -1,1 +1,3 @@
-export { YouTubeDL } from './YouTubeDL/YouTubeDL.node';
+import { YouTubeDL } from './YouTubeDL/YouTubeDL.node';
+
+export { YouTubeDL };

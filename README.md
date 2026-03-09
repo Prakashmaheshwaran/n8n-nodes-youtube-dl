@@ -1,26 +1,23 @@
 # n8n-nodes-youtube-dl
 
-[![n8n-community-node](https://img.shields.io/badge/n8n-community%20node-brightgreen)](https://n8n.io/)
-
-This is an n8n community node for downloading YouTube videos and audio. It uses [`@distube/ytdl-core`](https://github.com/distubejs/ytdl-core), a pure JavaScript library with no binary dependencies.
+A community node for n8n that allows downloading YouTube videos and audio using pure JavaScript. No binary installation required!
 
 ## Features
 
-- **Download Video**: Download full YouTube videos with quality selection (360p, 480p, 720p, 1080p, highest, lowest)
-- **Download Audio**: Extract audio only from YouTube videos in multiple formats (MP3, M4A, WebM)
-- **Get Video Info**: Retrieve comprehensive metadata including title, description, author, view count, likes, thumbnails, and more
-- **Pure JavaScript**: No external binaries or dependencies required
-- **Partial Downloads**: Support for downloading specific time ranges
-- **Custom File Names**: Option to specify custom file names for downloads
+- ✅ **Download Video** - Download YouTube videos in various qualities
+- ✅ **Download Audio** - Extract audio from YouTube videos
+- ✅ **Get Video Info** - Retrieve video metadata without downloading
+- ✅ **Pure JavaScript** - No binary dependencies, works in Docker
+- ✅ **Quality Selection** - Choose from highest, lowest, or specific quality
 
 ## Installation
 
-### Community Nodes (Recommended)
+### Install via n8n Community Nodes
 
-1. Go to **Settings > Community Nodes** in your n8n instance
+1. Go to **Settings** > **Community Nodes** in your n8n instance
 2. Click **Install**
 3. Enter `n8n-nodes-youtube-dl`
-4. Click **Install**
+4. Click **Install Node**
 
 ### Manual Installation
 
@@ -32,94 +29,118 @@ npm install n8n-nodes-youtube-dl
 
 ### Download Video
 
-1. Add the **YouTube DL** node to your workflow
-2. Select **Download Video** as the operation
-3. Enter the YouTube video URL
-4. Choose the desired quality (highest, lowest, 1080p, 720p, 480p, or 360p)
-5. (Optional) Configure additional options:
-   - **Start Time**: Begin download at a specific timestamp (in seconds)
-   - **End Time**: End download at a specific timestamp (0 = until end)
-   - **File Name**: Custom file name without extension
+1. Add the **YouTube Downloader** node to your workflow
+2. Select **Download Video** operation
+3. Enter the YouTube URL
+4. Choose video quality and filter options
+5. Run the node
 
 ### Download Audio
 
-1. Add the **YouTube DL** node to your workflow
-2. Select **Download Audio** as the operation
-3. Enter the YouTube video URL
-4. Choose audio quality and format (MP3, M4A, or WebM)
-5. (Optional) Configure additional options (start time, end time, custom file name)
+1. Select **Download Audio** operation
+2. Enter the YouTube URL
+3. Choose audio quality
+4. The audio will be downloaded in WebM format
 
 ### Get Video Info
 
-1. Add the **YouTube DL** node to your workflow
-2. Select **Get Video Info** as the operation
-3. Enter the YouTube video URL
-4. The node will return metadata including:
-   - Title and description
-   - Author and channel information
-   - View count and likes
-   - Upload and publish dates
-   - Thumbnails
-   - Duration
-   - Keywords and category
+1. Select **Get Video Info** operation
+2. Enter the YouTube URL
+3. Get detailed metadata including title, author, duration, thumbnails, and available formats
+
+## Parameters
+
+| Parameter | Description | Required |
+|-----------|-------------|----------|
+| Video URL | YouTube video URL or ID | Yes |
+| Operation | Download Video / Download Audio / Get Info | Yes |
+| Video Quality | Highest / Lowest / Highest Audio / Lowest Audio | No |
+| Filter | Video + Audio / Video Only / Audio Only | No |
+| Output Filename | Custom filename (optional) | No |
 
 ## Output
 
-### Download Operations
+### Binary Data
 
-Returns JSON data with:
-- `success`: Boolean indicating successful download
-- `title`: Video title
-- `videoId`: YouTube video ID
-- `fileName`: Downloaded file name
-- `fileSize`: File size in bytes
-- `quality`: Quality setting used
-- `format`: Audio format (audio downloads only)
+The node returns binary data that can be:
+- Saved to disk using the **Write Binary File** node
+- Uploaded to cloud storage
+- Processed by other nodes
 
-The binary file is attached to the output and can be processed by subsequent nodes (e.g., Write Binary File, HTTP Request, etc.).
+### JSON Data
 
-### Get Video Info
+The node also returns JSON metadata:
+```json
+{
+  "success": true,
+  "videoId": "...",
+  "title": "Video Title",
+  "author": "Channel Name",
+  "lengthSeconds": 120,
+  "viewCount": 100000,
+  "downloadType": "video",
+  "fileSize": 1234567
+}
+```
 
-Returns JSON data with:
-- `id`: Video ID
-- `title`: Video title
-- `description`: Video description
-- `author`: Channel name
-- `authorId`: Channel ID
-- `lengthSeconds`: Video duration in seconds
-- `viewCount`: View count
-- `likes`: Like count
-- `uploadDate`: Upload date
-- `publishDate`: Publish date
-- `thumbnails`: Array of thumbnail objects
-- `category`: Video category
-- `keywords`: Array of keywords
-- `averageRating`: Average rating
-- `videoUrl`: Original URL
-- `embedUrl`: Embed URL
-- `videoId`: Video ID
+## Important Notes
 
-## Error Handling
+### Legal Considerations
 
-The node includes built-in error handling:
-- Invalid YouTube URLs are detected and reported
-- Network errors are caught and can be handled with n8n's continue-on-fail option
-- Partial download failures are reported with detailed error messages
+⚠️ **Warning**: Downloading YouTube videos may violate YouTube's Terms of Service. This node is intended for:
+- Downloading your own content
+- Videos with Creative Commons licenses
+- Content you have permission to download
 
-## Compatibility
+Please respect copyright laws and YouTube's Terms of Service.
 
-- Requires n8n version 1.0.0 or higher
-- Compatible with Node.js 18.x and higher
+### Rate Limiting
 
-## Resources
+YouTube may rate-limit requests. The node includes basic error handling, but excessive use may result in temporary blocks.
 
-- [n8n Community Nodes Documentation](https://docs.n8n.io/integrations/creating-nodes/)
-- [@distube/ytdl-core Documentation](https://github.com/distubejs/ytdl-core)
+### Memory Usage
+
+Large videos consume memory during download. Ensure your n8n instance has sufficient memory allocated.
+
+## Technical Details
+
+This node uses [`@distube/ytdl-core`](https://www.npmjs.com/package/@distube/ytdl-core), a pure JavaScript YouTube downloader that doesn't require any binary installation.
+
+**Key benefits:**
+- ✅ No Python or FFmpeg required
+- ✅ Works in Docker containers
+- ✅ Works on all platforms (Windows, macOS, Linux)
+- ✅ Smaller footprint than yt-dlp
+
+## Development
+
+```bash
+# Clone the repository
+git clone https://github.com/prakashmaheshwaran/n8n-nodes-youtube-dl.git
+
+# Install dependencies
+npm install
+
+# Build the project
+npm run build
+
+# Link to n8n for testing
+npm link
+```
 
 ## License
 
-[MIT](LICENSE)
+MIT License - see [LICENSE](LICENSE) file for details.
+
+## Contributing
+
+Contributions are welcome! Please submit a pull request or open an issue.
 
 ## Support
 
-For issues and feature requests, please visit the [GitHub repository](https://github.com/prakashmaheshwaran/n8n-nodes-youtube-dl).
+For issues or feature requests, please use the [GitHub Issues](https://github.com/prakashmaheshwaran/n8n-nodes-youtube-dl/issues) page.
+
+## Credits
+
+- Built with [`@distube/ytdl-core`](https://github.com/distubejs/ytdl-core)
+- Inspired by n8n community node best practices
