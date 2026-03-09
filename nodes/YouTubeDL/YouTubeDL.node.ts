@@ -7,6 +7,182 @@ import {
 } from 'n8n-workflow';
 import ytdl from '@distube/ytdl-core';
 
+async function downloadVideo(
+  context: IExecuteFunctions,
+  videoUrl: string,
+  videoId: string,
+  itemIndex: number,
+  returnData: INodeExecutionData[]
+): Promise<void> {
+  const videoQuality = context.getNodeParameter('videoQuality', itemIndex) as string;
+  const videoFilter = context.getNodeParameter('videoFilter', itemIndex) as ytdl.Filter;
+  const customFilename = context.getNodeParameter('outputFilename', itemIndex) as string;
+
+  const info = await ytdl.getInfo(videoUrl);
+  const filename = customFilename || 
+    `${info.videoDetails.title.replace(/[^a-z0-9]/gi, '_')}_${videoId}`;
+
+  const chunks: Buffer[] = [];
+  const stream = ytdl(videoUrl, {
+    quality: videoQuality as any,
+    filter: videoFilter,
+  });
+
+  return new Promise((resolve, reject) => {
+    stream.on('data', (chunk: Buffer) => {
+      chunks.push(chunk);
+    });
+
+    stream.on('end', () => {
+      const buffer = Buffer.concat(chunks);
+      const base64Data = buffer.toString('base64');
+
+      const mimeType = videoFilter === 'audioonly' ? 'audio/webm' : 'video/mp4';
+      const extension = videoFilter === 'audioonly' ? 'webm' : 'mp4';
+
+      returnData.push({
+        json: {
+          success: true,
+          videoId,
+          title: info.videoDetails.title,
+          author: info.videoDetails.author.name,
+          lengthSeconds: info.videoDetails.lengthSeconds,
+          viewCount: info.videoDetails.viewCount,
+          downloadType: 'video',
+          fileSize: buffer.length,
+        },
+        binary: {
+          [filename]: {
+            data: base64Data,
+            mimeType,
+            fileExtension: extension,
+            fileName: `${filename}.${extension}`,
+          },
+        },
+      });
+      resolve();
+    });
+
+    stream.on('error', (error: Error) => {
+      reject(new NodeOperationError(
+        context.getNode(),
+        `Download failed: ${error.message}`,
+        { itemIndex }
+      ));
+    });
+  });
+}
+
+async function downloadAudio(
+  context: IExecuteFunctions,
+  videoUrl: string,
+  videoId: string,
+  itemIndex: number,
+  returnData: INodeExecutionData[]
+): Promise<void> {
+  const audioQuality = context.getNodeParameter('audioQuality', itemIndex) as string;
+  const customFilename = context.getNodeParameter('outputFilename', itemIndex) as string;
+
+  const info = await ytdl.getInfo(videoUrl);
+  const filename = customFilename || 
+    `${info.videoDetails.title.replace(/[^a-z0-9]/gi, '_')}_${videoId}_audio`;
+
+  const chunks: Buffer[] = [];
+  const stream = ytdl(videoUrl, {
+    filter: 'audioonly',
+    quality: audioQuality as any,
+  });
+
+  return new Promise((resolve, reject) => {
+    stream.on('data', (chunk: Buffer) => {
+      chunks.push(chunk);
+    });
+
+    stream.on('end', () => {
+      const buffer = Buffer.concat(chunks);
+      const base64Data = buffer.toString('base64');
+
+      returnData.push({
+        json: {
+          success: true,
+          videoId,
+          title: info.videoDetails.title,
+          author: info.videoDetails.author.name,
+          lengthSeconds: info.videoDetails.lengthSeconds,
+          downloadType: 'audio',
+          fileSize: buffer.length,
+        },
+        binary: {
+          [filename]: {
+            data: base64Data,
+            mimeType: 'audio/webm',
+            fileExtension: 'webm',
+            fileName: `${filename}.webm`,
+          },
+        },
+      });
+      resolve();
+    });
+
+    stream.on('error', (error: Error) => {
+      reject(new NodeOperationError(
+        context.getNode(),
+        `Audio download failed: ${error.message}`,
+        { itemIndex }
+      ));
+    });
+  });
+}
+
+async function getVideoInfo(
+  context: IExecuteFunctions,
+  videoUrl: string,
+  videoId: string,
+  itemIndex: number,
+  returnData: INodeExecutionData[]
+): Promise<void> {
+  const info = await ytdl.getInfo(videoUrl);
+
+  const formats = info.formats.map(format => ({
+    itag: format.itag,
+    quality: format.quality,
+    qualityLabel: format.qualityLabel,
+    container: format.container,
+    hasVideo: format.hasVideo,
+    hasAudio: format.hasAudio,
+    videoCodec: format.videoCodec,
+    audioCodec: format.audioCodec,
+    bitrate: format.bitrate,
+    audioBitrate: format.audioBitrate,
+    fps: format.fps,
+    width: format.width,
+    height: format.height,
+  }));
+
+  returnData.push({
+    json: {
+      success: true,
+      videoId,
+      title: info.videoDetails.title,
+      description: info.videoDetails.description,
+      lengthSeconds: info.videoDetails.lengthSeconds,
+      viewCount: info.videoDetails.viewCount,
+      uploadDate: info.videoDetails.uploadDate,
+      author: {
+        name: info.videoDetails.author.name,
+        channelUrl: info.videoDetails.author.channel_url,
+        subscriberCount: info.videoDetails.author.subscriber_count,
+      },
+      thumbnails: info.videoDetails.thumbnails,
+      formats: formats,
+      category: info.videoDetails.category,
+      keywords: info.videoDetails.keywords,
+      isLive: info.videoDetails.isLiveContent,
+      videoUrl: info.videoDetails.video_url,
+    },
+  });
+}
+
 export class YouTubeDL implements INodeType {
   description: INodeTypeDescription = {
     displayName: 'YouTube Downloader',
@@ -136,7 +312,6 @@ export class YouTubeDL implements INodeType {
           );
         }
 
-        // Validate URL
         if (!ytdl.validateURL(videoUrl)) {
           throw new NodeOperationError(
             this.getNode(),
@@ -149,15 +324,15 @@ export class YouTubeDL implements INodeType {
 
         switch (operation) {
           case 'downloadVideo':
-            await this.downloadVideo(videoUrl, videoId, i, returnData);
+            await downloadVideo(this, videoUrl, videoId, i, returnData);
             break;
 
           case 'downloadAudio':
-            await this.downloadAudio(videoUrl, videoId, i, returnData);
+            await downloadAudio(this, videoUrl, videoId, i, returnData);
             break;
 
           case 'getInfo':
-            await this.getVideoInfo(videoUrl, videoId, i, returnData);
+            await getVideoInfo(this, videoUrl, videoId, i, returnData);
             break;
 
           default:
@@ -167,7 +342,7 @@ export class YouTubeDL implements INodeType {
               { itemIndex: i }
             );
         }
-      } catch (error) {
+      } catch (error: any) {
         if (this.continueOnFail()) {
           returnData.push({
             json: {
@@ -182,178 +357,5 @@ export class YouTubeDL implements INodeType {
     }
 
     return [returnData];
-  }
-
-  private async downloadVideo(
-    videoUrl: string,
-    videoId: string,
-    itemIndex: number,
-    returnData: INodeExecutionData[]
-  ): Promise<void> {
-    const videoQuality = this.getNodeParameter('videoQuality', itemIndex) as string;
-    const videoFilter = this.getNodeParameter('videoFilter', itemIndex) as ytdl.Filter;
-    const customFilename = this.getNodeParameter('outputFilename', itemIndex) as string;
-
-    const info = await ytdl.getInfo(videoUrl);
-    const filename = customFilename || 
-      `${info.videoDetails.title.replace(/[^a-z0-9]/gi, '_')}_${videoId}`;
-
-    const chunks: Buffer[] = [];
-    const stream = ytdl(videoUrl, {
-      quality: videoQuality as ytdl.quality,
-      filter: videoFilter,
-    });
-
-    return new Promise((resolve, reject) => {
-      stream.on('data', (chunk: Buffer) => {
-        chunks.push(chunk);
-      });
-
-      stream.on('end', () => {
-        const buffer = Buffer.concat(chunks);
-        const base64Data = buffer.toString('base64');
-
-        const mimeType = videoFilter === 'audioonly' ? 'audio/webm' : 'video/mp4';
-        const extension = videoFilter === 'audioonly' ? 'webm' : 'mp4';
-
-        returnData.push({
-          json: {
-            success: true,
-            videoId,
-            title: info.videoDetails.title,
-            author: info.videoDetails.author.name,
-            lengthSeconds: info.videoDetails.lengthSeconds,
-            viewCount: info.videoDetails.viewCount,
-            downloadType: 'video',
-            fileSize: buffer.length,
-          },
-          binary: {
-            [filename]: {
-              data: base64Data,
-              mimeType,
-              fileExtension: extension,
-              fileName: `${filename}.${extension}`,
-            },
-          },
-        });
-        resolve();
-      });
-
-      stream.on('error', (error: Error) => {
-        reject(new NodeOperationError(
-          this.getNode(),
-          `Download failed: ${error.message}`,
-          { itemIndex }
-        ));
-      });
-    });
-  }
-
-  private async downloadAudio(
-    videoUrl: string,
-    videoId: string,
-    itemIndex: number,
-    returnData: INodeExecutionData[]
-  ): Promise<void> {
-    const audioQuality = this.getNodeParameter('audioQuality', itemIndex) as string;
-    const customFilename = this.getNodeParameter('outputFilename', itemIndex) as string;
-
-    const info = await ytdl.getInfo(videoUrl);
-    const filename = customFilename || 
-      `${info.videoDetails.title.replace(/[^a-z0-9]/gi, '_')}_${videoId}_audio`;
-
-    const chunks: Buffer[] = [];
-    const stream = ytdl(videoUrl, {
-      filter: 'audioonly',
-      quality: audioQuality as ytdl.quality,
-    });
-
-    return new Promise((resolve, reject) => {
-      stream.on('data', (chunk: Buffer) => {
-        chunks.push(chunk);
-      });
-
-      stream.on('end', () => {
-        const buffer = Buffer.concat(chunks);
-        const base64Data = buffer.toString('base64');
-
-        returnData.push({
-          json: {
-            success: true,
-            videoId,
-            title: info.videoDetails.title,
-            author: info.videoDetails.author.name,
-            lengthSeconds: info.videoDetails.lengthSeconds,
-            downloadType: 'audio',
-            fileSize: buffer.length,
-          },
-          binary: {
-            [filename]: {
-              data: base64Data,
-              mimeType: 'audio/webm',
-              fileExtension: 'webm',
-              fileName: `${filename}.webm`,
-            },
-          },
-        });
-        resolve();
-      });
-
-      stream.on('error', (error: Error) => {
-        reject(new NodeOperationError(
-          this.getNode(),
-          `Audio download failed: ${error.message}`,
-          { itemIndex }
-        ));
-      });
-    });
-  }
-
-  private async getVideoInfo(
-    videoUrl: string,
-    videoId: string,
-    itemIndex: number,
-    returnData: INodeExecutionData[]
-  ): Promise<void> {
-    const info = await ytdl.getInfo(videoUrl);
-
-    const formats = info.formats.map(format => ({
-      itag: format.itag,
-      quality: format.quality,
-      qualityLabel: format.qualityLabel,
-      container: format.container,
-      hasVideo: format.hasVideo,
-      hasAudio: format.hasAudio,
-      videoCodec: format.videoCodec,
-      audioCodec: format.audioCodec,
-      bitrate: format.bitrate,
-      audioBitrate: format.audioBitrate,
-      fps: format.fps,
-      width: format.width,
-      height: format.height,
-    }));
-
-    returnData.push({
-      json: {
-        success: true,
-        videoId,
-        title: info.videoDetails.title,
-        description: info.videoDetails.description,
-        lengthSeconds: info.videoDetails.lengthSeconds,
-        viewCount: info.videoDetails.viewCount,
-        uploadDate: info.videoDetails.uploadDate,
-        author: {
-          name: info.videoDetails.author.name,
-          channelUrl: info.videoDetails.author.channel_url,
-          subscriberCount: info.videoDetails.author.subscriber_count,
-        },
-        thumbnails: info.videoDetails.thumbnails,
-        formats: formats,
-        category: info.videoDetails.category,
-        keywords: info.videoDetails.keywords,
-        isLive: info.videoDetails.isLiveContent,
-        videoUrl: info.videoDetails.video_url,
-      },
-    });
   }
 }
