@@ -5,32 +5,84 @@ import {
   INodeTypeDescription,
   NodeOperationError,
 } from 'n8n-workflow';
-import ytdl from '@distube/ytdl-core';
+import { Innertube } from 'youtubei.js';
 
-async function buildAgent(
-  context: IExecuteFunctions,
-  itemIndex: number,
-): Promise<ReturnType<typeof ytdl.createAgent>> {
-  const useProxy = context.getNodeParameter('useProxy', itemIndex) as boolean;
-  const proxyUrl = useProxy
-    ? (context.getNodeParameter('proxyUrl', itemIndex) as string)
-    : undefined;
+function extractVideoId(input: string): string {
+  const trimmed = input.trim();
 
-  let cookies: any[] = [];
+  // Handle YouTube URLs
+  const urlMatch = trimmed.match(
+    /(?:youtube\.com\/(?:watch\?.*v=|embed\/|shorts\/|live\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/,
+  );
+  if (urlMatch) return urlMatch[1];
+
+  // Handle bare video ID
+  if (/^[a-zA-Z0-9_-]{11}$/.test(trimmed)) return trimmed;
+
+  throw new Error(`Could not extract video ID from: ${input}`);
+}
+
+function isValidYouTubeInput(input: string): boolean {
+  try {
+    extractVideoId(input);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function collectStreamWithTimeout(
+  stream: ReadableStream<Uint8Array>,
+  timeoutMs: number,
+): Promise<Buffer> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let timer: ReturnType<typeof setTimeout>;
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reader.cancel();
+      reject(new Error(`Download timed out after ${timeoutMs / 1000} seconds`));
+    }, timeoutMs);
+  });
+
+  const collectPromise = (async () => {
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+      }
+      return Buffer.concat(chunks);
+    } finally {
+      clearTimeout(timer!);
+    }
+  })();
+
+  return Promise.race([collectPromise, timeoutPromise]);
+}
+
+async function createInnertubeClient(context: IExecuteFunctions): Promise<Innertube> {
+  // Get cookies from credentials
+  let cookieString: string | undefined;
   try {
     const credentials = await context.getCredentials('youTubeDLCookies');
     if (credentials?.cookiesJson) {
       const parsed = JSON.parse(credentials.cookiesJson as string);
-      if (Array.isArray(parsed)) {
-        cookies = parsed;
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        cookieString = parsed.map((c: any) => `${c.name}=${c.value}`).join('; ');
       }
     }
   } catch {
-    // No credentials configured — proceed without cookies
+    // No credentials configured
   }
 
-  if (proxyUrl) {
-    if (proxyUrl.startsWith('socks')) {
+  // Get proxy settings
+  const useProxy = context.getNodeParameter('useProxy', 0) as boolean;
+  let proxyUrl: string | undefined;
+  if (useProxy) {
+    proxyUrl = context.getNodeParameter('proxyUrl', 0) as string;
+    if (proxyUrl?.startsWith('socks')) {
       throw new Error(
         'SOCKS proxies are not supported in this version. Please use an HTTP or HTTPS proxy.',
       );
@@ -40,99 +92,94 @@ async function buildAgent(
     } catch {
       throw new Error(`Invalid proxy URL: ${proxyUrl}`);
     }
-    return ytdl.createProxyAgent(proxyUrl, cookies);
   }
 
-  return ytdl.createAgent(cookies);
+  const options: any = {};
+
+  if (cookieString) {
+    options.cookie = cookieString;
+  }
+
+  if (proxyUrl) {
+    // undici is bundled with Node.js 20+ (required by n8n)
+    const { ProxyAgent } = require('undici');
+    const dispatcher = new ProxyAgent(proxyUrl);
+    options.fetch = (input: any, init: any) => {
+      return fetch(input, { ...init, dispatcher } as any);
+    };
+  }
+
+  return Innertube.create(options);
 }
 
 async function downloadVideo(
+  innertube: Innertube,
   context: IExecuteFunctions,
-  videoUrl: string,
   videoId: string,
   itemIndex: number,
   returnData: INodeExecutionData[],
 ): Promise<void> {
   const videoQuality = context.getNodeParameter('videoQuality', itemIndex) as string;
-  const videoFilter = context.getNodeParameter('videoFilter', itemIndex) as ytdl.Filter;
+  const videoFilter = context.getNodeParameter('videoFilter', itemIndex) as string;
   const customFilename = context.getNodeParameter('outputFilename', itemIndex) as string;
   const timeoutSeconds = context.getNodeParameter('timeoutSeconds', itemIndex, 300) as number;
   const useProxy = context.getNodeParameter('useProxy', itemIndex) as boolean;
 
-  const agent = await buildAgent(context, itemIndex);
-  const info = await ytdl.getInfo(videoUrl, { agent });
-  const filename =
-    customFilename || `${info.videoDetails.title.replace(/[^a-z0-9]/gi, '_')}_${videoId}`;
+  const info = await innertube.getInfo(videoId);
+  const title = info.basic_info?.title || 'video';
+  const filename = customFilename || `${title.replace(/[^a-z0-9]/gi, '_')}_${videoId}`;
 
-  const chunks: Buffer[] = [];
-  const stream = ytdl(videoUrl, {
-    quality: videoQuality as any,
-    filter: videoFilter,
-    agent,
-  });
+  // Map quality options
+  const quality = videoQuality === 'lowest' || videoQuality === 'lowestaudio'
+    ? 'bestefficiency'
+    : 'best';
 
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      stream.destroy();
-      reject(
-        new NodeOperationError(
-          context.getNode(),
-          `Download timed out after ${timeoutSeconds} seconds`,
-          { itemIndex },
-        ),
-      );
-    }, timeoutSeconds * 1000);
+  // Map filter to download type
+  let type: string;
+  switch (videoFilter) {
+    case 'videoonly':
+      type = 'video';
+      break;
+    case 'audioonly':
+      type = 'audio';
+      break;
+    default:
+      type = 'video+audio';
+  }
 
-    stream.on('data', (chunk: Buffer) => {
-      chunks.push(chunk);
-    });
+  const stream = await innertube.download(videoId, { quality, type } as any);
+  const buffer = await collectStreamWithTimeout(stream, timeoutSeconds * 1000);
+  const base64Data = buffer.toString('base64');
 
-    stream.on('end', () => {
-      clearTimeout(timeout);
-      const buffer = Buffer.concat(chunks);
-      const base64Data = buffer.toString('base64');
+  const mimeType = videoFilter === 'audioonly' ? 'audio/webm' : 'video/mp4';
+  const extension = videoFilter === 'audioonly' ? 'webm' : 'mp4';
 
-      const mimeType = videoFilter === 'audioonly' ? 'audio/webm' : 'video/mp4';
-      const extension = videoFilter === 'audioonly' ? 'webm' : 'mp4';
-
-      returnData.push({
-        json: {
-          success: true,
-          videoId,
-          title: info.videoDetails.title,
-          author: info.videoDetails.author.name,
-          lengthSeconds: info.videoDetails.lengthSeconds,
-          viewCount: info.videoDetails.viewCount,
-          downloadType: 'video',
-          fileSize: buffer.length,
-          proxyUsed: useProxy,
-        },
-        binary: {
-          [filename]: {
-            data: base64Data,
-            mimeType,
-            fileExtension: extension,
-            fileName: `${filename}.${extension}`,
-          },
-        },
-      });
-      resolve();
-    });
-
-    stream.on('error', (error: Error) => {
-      clearTimeout(timeout);
-      reject(
-        new NodeOperationError(context.getNode(), `Download failed: ${error.message}`, {
-          itemIndex,
-        }),
-      );
-    });
+  returnData.push({
+    json: {
+      success: true,
+      videoId,
+      title,
+      author: info.basic_info?.author || '',
+      lengthSeconds: String(info.basic_info?.duration || 0),
+      viewCount: String(info.basic_info?.view_count || 0),
+      downloadType: 'video',
+      fileSize: buffer.length,
+      proxyUsed: useProxy,
+    },
+    binary: {
+      [filename]: {
+        data: base64Data,
+        mimeType,
+        fileExtension: extension,
+        fileName: `${filename}.${extension}`,
+      },
+    },
   });
 }
 
 async function downloadAudio(
+  innertube: Innertube,
   context: IExecuteFunctions,
-  videoUrl: string,
   videoId: string,
   itemIndex: number,
   returnData: INodeExecutionData[],
@@ -142,121 +189,85 @@ async function downloadAudio(
   const timeoutSeconds = context.getNodeParameter('timeoutSeconds', itemIndex, 300) as number;
   const useProxy = context.getNodeParameter('useProxy', itemIndex) as boolean;
 
-  const agent = await buildAgent(context, itemIndex);
-  const info = await ytdl.getInfo(videoUrl, { agent });
+  const info = await innertube.getInfo(videoId);
+  const title = info.basic_info?.title || 'audio';
   const filename =
-    customFilename || `${info.videoDetails.title.replace(/[^a-z0-9]/gi, '_')}_${videoId}_audio`;
+    customFilename || `${title.replace(/[^a-z0-9]/gi, '_')}_${videoId}_audio`;
 
-  const chunks: Buffer[] = [];
-  const stream = ytdl(videoUrl, {
-    filter: 'audioonly',
-    quality: audioQuality as any,
-    agent,
-  });
+  const quality = audioQuality === 'lowest' ? 'bestefficiency' : 'best';
+  const stream = await innertube.download(videoId, { type: 'audio', quality } as any);
+  const buffer = await collectStreamWithTimeout(stream, timeoutSeconds * 1000);
+  const base64Data = buffer.toString('base64');
 
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      stream.destroy();
-      reject(
-        new NodeOperationError(
-          context.getNode(),
-          `Audio download timed out after ${timeoutSeconds} seconds`,
-          { itemIndex },
-        ),
-      );
-    }, timeoutSeconds * 1000);
-
-    stream.on('data', (chunk: Buffer) => {
-      chunks.push(chunk);
-    });
-
-    stream.on('end', () => {
-      clearTimeout(timeout);
-      const buffer = Buffer.concat(chunks);
-      const base64Data = buffer.toString('base64');
-
-      returnData.push({
-        json: {
-          success: true,
-          videoId,
-          title: info.videoDetails.title,
-          author: info.videoDetails.author.name,
-          lengthSeconds: info.videoDetails.lengthSeconds,
-          downloadType: 'audio',
-          fileSize: buffer.length,
-          proxyUsed: useProxy,
-        },
-        binary: {
-          [filename]: {
-            data: base64Data,
-            mimeType: 'audio/webm',
-            fileExtension: 'webm',
-            fileName: `${filename}.webm`,
-          },
-        },
-      });
-      resolve();
-    });
-
-    stream.on('error', (error: Error) => {
-      clearTimeout(timeout);
-      reject(
-        new NodeOperationError(context.getNode(), `Audio download failed: ${error.message}`, {
-          itemIndex,
-        }),
-      );
-    });
+  returnData.push({
+    json: {
+      success: true,
+      videoId,
+      title,
+      author: info.basic_info?.author || '',
+      lengthSeconds: String(info.basic_info?.duration || 0),
+      downloadType: 'audio',
+      fileSize: buffer.length,
+      proxyUsed: useProxy,
+    },
+    binary: {
+      [filename]: {
+        data: base64Data,
+        mimeType: 'audio/webm',
+        fileExtension: 'webm',
+        fileName: `${filename}.webm`,
+      },
+    },
   });
 }
 
 async function getVideoInfo(
+  innertube: Innertube,
   context: IExecuteFunctions,
-  videoUrl: string,
   videoId: string,
   itemIndex: number,
   returnData: INodeExecutionData[],
 ): Promise<void> {
   const useProxy = context.getNodeParameter('useProxy', itemIndex) as boolean;
 
-  const agent = await buildAgent(context, itemIndex);
-  const info = await ytdl.getInfo(videoUrl, { agent });
+  const info = await innertube.getInfo(videoId);
 
-  const formats = info.formats.map(format => ({
+  const allFormats = [
+    ...(info.streaming_data?.formats || []),
+    ...(info.streaming_data?.adaptive_formats || []),
+  ];
+
+  const formats = allFormats.map((format: any) => ({
     itag: format.itag,
     quality: format.quality,
-    qualityLabel: format.qualityLabel,
-    container: format.container,
-    hasVideo: format.hasVideo,
-    hasAudio: format.hasAudio,
-    videoCodec: format.videoCodec,
-    audioCodec: format.audioCodec,
+    qualityLabel: format.quality_label,
+    mimeType: format.mime_type,
+    hasVideo: format.has_video,
+    hasAudio: format.has_audio,
     bitrate: format.bitrate,
-    audioBitrate: format.audioBitrate,
     fps: format.fps,
     width: format.width,
     height: format.height,
+    contentLength: format.content_length,
   }));
 
   returnData.push({
     json: {
       success: true,
       videoId,
-      title: info.videoDetails.title,
-      description: info.videoDetails.description,
-      lengthSeconds: info.videoDetails.lengthSeconds,
-      viewCount: info.videoDetails.viewCount,
-      uploadDate: info.videoDetails.uploadDate,
+      title: info.basic_info?.title,
+      description: info.basic_info?.short_description,
+      lengthSeconds: String(info.basic_info?.duration || 0),
+      viewCount: String(info.basic_info?.view_count || 0),
       author: {
-        name: info.videoDetails.author.name,
-        channelUrl: info.videoDetails.author.channel_url,
-        subscriberCount: info.videoDetails.author.subscriber_count,
+        name: info.basic_info?.author,
+        channelUrl: info.basic_info?.channel?.url,
       },
-      thumbnails: info.videoDetails.thumbnails,
-      formats: formats,
-      category: info.videoDetails.category,
-      keywords: info.videoDetails.keywords,
-      isLive: info.videoDetails.isLiveContent,
-      videoUrl: info.videoDetails.video_url,
+      thumbnails: info.basic_info?.thumbnail,
+      formats,
+      keywords: info.basic_info?.keywords,
+      isLive: info.basic_info?.is_live,
+      videoUrl: `https://www.youtube.com/watch?v=${videoId}`,
       proxyUsed: useProxy,
     },
   });
@@ -326,8 +337,6 @@ export class YouTubeDL implements INodeType {
         options: [
           { name: 'Highest', value: 'highest' },
           { name: 'Lowest', value: 'lowest' },
-          { name: 'Highest Audio', value: 'highestaudio' },
-          { name: 'Lowest Audio', value: 'lowestaudio' },
         ],
         default: 'highest',
         displayOptions: {
@@ -413,50 +422,48 @@ export class YouTubeDL implements INodeType {
   async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
     const items = this.getInputData();
     const returnData: INodeExecutionData[] = [];
-
     const operation = this.getNodeParameter('operation', 0) as string;
+
+    // Create Innertube client once for all items
+    const innertube = await createInnertubeClient(this);
 
     for (let i = 0; i < items.length; i++) {
       try {
         const videoUrl = this.getNodeParameter('videoUrl', i) as string;
-        
+
         if (!videoUrl) {
+          throw new NodeOperationError(this.getNode(), 'Video URL is required', {
+            itemIndex: i,
+          });
+        }
+
+        if (!isValidYouTubeInput(videoUrl)) {
           throw new NodeOperationError(
             this.getNode(),
-            'Video URL is required',
-            { itemIndex: i }
+            `Invalid YouTube URL or video ID: ${videoUrl}`,
+            { itemIndex: i },
           );
         }
 
-        if (!ytdl.validateURL(videoUrl)) {
-          throw new NodeOperationError(
-            this.getNode(),
-            `Invalid YouTube URL: ${videoUrl}`,
-            { itemIndex: i }
-          );
-        }
-
-        const videoId = ytdl.getVideoID(videoUrl);
+        const videoId = extractVideoId(videoUrl);
 
         switch (operation) {
           case 'downloadVideo':
-            await downloadVideo(this, videoUrl, videoId, i, returnData);
+            await downloadVideo(innertube, this, videoId, i, returnData);
             break;
 
           case 'downloadAudio':
-            await downloadAudio(this, videoUrl, videoId, i, returnData);
+            await downloadAudio(innertube, this, videoId, i, returnData);
             break;
 
           case 'getInfo':
-            await getVideoInfo(this, videoUrl, videoId, i, returnData);
+            await getVideoInfo(innertube, this, videoId, i, returnData);
             break;
 
           default:
-            throw new NodeOperationError(
-              this.getNode(),
-              `Unknown operation: ${operation}`,
-              { itemIndex: i }
-            );
+            throw new NodeOperationError(this.getNode(), `Unknown operation: ${operation}`, {
+              itemIndex: i,
+            });
         }
       } catch (error: any) {
         if (this.continueOnFail()) {
