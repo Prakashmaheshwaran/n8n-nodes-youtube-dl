@@ -1,9 +1,10 @@
+const { src, dest, series } = require('gulp');
 const path = require('path');
-const { task, src, dest } = require('gulp');
 
-task('build:icons', () => {
-  const nodeSource = path.resolve('nodes');
-  const nodeDestination = path.resolve('dist', 'nodes');
+function buildIcons() {
+  return src('nodes/**/*.{png,svg}')
+    .pipe(dest('dist/nodes'));
+}
 
-  return src([`${nodeSource}/**/*.svg`]).pipe(dest(nodeDestination));
-});
+exports['build:icons'] = buildIcons;
+exports.default = series(buildIcons);

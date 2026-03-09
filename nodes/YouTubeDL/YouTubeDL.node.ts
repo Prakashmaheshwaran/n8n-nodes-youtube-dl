@@ -6,6 +6,17 @@ import {
   NodeOperationError,
 } from 'n8n-workflow';
 import ytdl from '@distube/ytdl-core';
+import { HttpsProxyAgent } from 'https-proxy-agent';
+import { SocksProxyAgent } from 'socks-proxy-agent';
+
+function createProxyAgent(proxyUrl: string): HttpsProxyAgent<string> | SocksProxyAgent | undefined {
+  if (!proxyUrl) return undefined;
+  
+  if (proxyUrl.startsWith('socks')) {
+    return new SocksProxyAgent(proxyUrl);
+  }
+  return new HttpsProxyAgent(proxyUrl);
+}
 
 async function downloadVideo(
   context: IExecuteFunctions,
@@ -17,8 +28,15 @@ async function downloadVideo(
   const videoQuality = context.getNodeParameter('videoQuality', itemIndex) as string;
   const videoFilter = context.getNodeParameter('videoFilter', itemIndex) as ytdl.Filter;
   const customFilename = context.getNodeParameter('outputFilename', itemIndex) as string;
+  const useProxy = context.getNodeParameter('useProxy', itemIndex) as boolean;
+  
+  let agent: HttpsProxyAgent<string> | SocksProxyAgent | undefined;
+  if (useProxy) {
+    const proxyUrl = context.getNodeParameter('proxyUrl', itemIndex) as string;
+    agent = createProxyAgent(proxyUrl);
+  }
 
-  const info = await ytdl.getInfo(videoUrl);
+  const info = await ytdl.getInfo(videoUrl, { agent: agent as any });
   const filename = customFilename || 
     `${info.videoDetails.title.replace(/[^a-z0-9]/gi, '_')}_${videoId}`;
 
@@ -26,6 +44,7 @@ async function downloadVideo(
   const stream = ytdl(videoUrl, {
     quality: videoQuality as any,
     filter: videoFilter,
+    agent: agent as any,
   });
 
   return new Promise((resolve, reject) => {
@@ -50,6 +69,7 @@ async function downloadVideo(
           viewCount: info.videoDetails.viewCount,
           downloadType: 'video',
           fileSize: buffer.length,
+          proxyUsed: useProxy,
         },
         binary: {
           [filename]: {
@@ -82,8 +102,15 @@ async function downloadAudio(
 ): Promise<void> {
   const audioQuality = context.getNodeParameter('audioQuality', itemIndex) as string;
   const customFilename = context.getNodeParameter('outputFilename', itemIndex) as string;
+  const useProxy = context.getNodeParameter('useProxy', itemIndex) as boolean;
+  
+  let agent: HttpsProxyAgent<string> | SocksProxyAgent | undefined;
+  if (useProxy) {
+    const proxyUrl = context.getNodeParameter('proxyUrl', itemIndex) as string;
+    agent = createProxyAgent(proxyUrl);
+  }
 
-  const info = await ytdl.getInfo(videoUrl);
+  const info = await ytdl.getInfo(videoUrl, { agent: agent as any });
   const filename = customFilename || 
     `${info.videoDetails.title.replace(/[^a-z0-9]/gi, '_')}_${videoId}_audio`;
 
@@ -91,6 +118,7 @@ async function downloadAudio(
   const stream = ytdl(videoUrl, {
     filter: 'audioonly',
     quality: audioQuality as any,
+    agent: agent as any,
   });
 
   return new Promise((resolve, reject) => {
@@ -111,6 +139,7 @@ async function downloadAudio(
           lengthSeconds: info.videoDetails.lengthSeconds,
           downloadType: 'audio',
           fileSize: buffer.length,
+          proxyUsed: useProxy,
         },
         binary: {
           [filename]: {
@@ -141,7 +170,15 @@ async function getVideoInfo(
   itemIndex: number,
   returnData: INodeExecutionData[]
 ): Promise<void> {
-  const info = await ytdl.getInfo(videoUrl);
+  const useProxy = context.getNodeParameter('useProxy', itemIndex) as boolean;
+  
+  let agent: HttpsProxyAgent<string> | SocksProxyAgent | undefined;
+  if (useProxy) {
+    const proxyUrl = context.getNodeParameter('proxyUrl', itemIndex) as string;
+    agent = createProxyAgent(proxyUrl);
+  }
+
+  const info = await ytdl.getInfo(videoUrl, { agent: agent as any });
 
   const formats = info.formats.map(format => ({
     itag: format.itag,
@@ -179,6 +216,7 @@ async function getVideoInfo(
       keywords: info.videoDetails.keywords,
       isLive: info.videoDetails.isLiveContent,
       videoUrl: info.videoDetails.video_url,
+      proxyUsed: useProxy,
     },
   });
 }
@@ -290,6 +328,26 @@ export class YouTubeDL implements INodeType {
         default: '',
         placeholder: 'auto-generated',
         description: 'Custom filename (optional, extension auto-added)',
+      },
+      {
+        displayName: 'Proxy',
+        name: 'useProxy',
+        type: 'boolean',
+        default: false,
+        description: 'Whether to use a proxy for the request',
+      },
+      {
+        displayName: 'Proxy URL',
+        name: 'proxyUrl',
+        type: 'string',
+        default: '',
+        placeholder: 'http://user:pass@proxy:port',
+        description: 'Proxy URL (supports HTTP, HTTPS, SOCKS4, SOCKS5)',
+        displayOptions: {
+          show: {
+            useProxy: [true],
+          },
+        },
       },
     ],
   };
