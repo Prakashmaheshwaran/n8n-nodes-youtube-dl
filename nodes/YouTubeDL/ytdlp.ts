@@ -127,22 +127,37 @@ function downloadWithWget(url: string, dest: string): void {
   });
 }
 
-function downloadWithHttps(url: string): Promise<Buffer> {
+function downloadWithHttps(url: string, timeoutMs = 120_000): Promise<Buffer> {
   return new Promise((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let settled = false;
+
+    const settle = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      fn();
+    };
+
+    timer = setTimeout(() => {
+      settle(() => reject(new Error(`https download timed out after ${timeoutMs / 1000}s`)));
+    }, timeoutMs);
+
     const request = (u: string, redirects = 0) => {
-      if (redirects > 10) { reject(new Error('Too many redirects')); return; }
-      https.get(u, { headers: { 'User-Agent': 'n8n-nodes-youtube-dl/2.x' } }, (res) => {
+      if (redirects > 10) { settle(() => reject(new Error('Too many redirects'))); return; }
+      const req = https.get(u, { headers: { 'User-Agent': 'n8n-nodes-youtube-dl/3.x' } }, (res) => {
         if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           request(res.headers.location, redirects + 1); return;
         }
         if (!res.statusCode || res.statusCode >= 400) {
-          reject(new Error(`HTTP ${res.statusCode}`)); return;
+          settle(() => reject(new Error(`HTTP ${res.statusCode}`))); return;
         }
         const chunks: Buffer[] = [];
         res.on('data', (c: Buffer) => chunks.push(c));
-        res.on('end', () => resolve(Buffer.concat(chunks)));
-        res.on('error', reject);
-      }).on('error', reject);
+        res.on('end', () => settle(() => resolve(Buffer.concat(chunks))));
+        res.on('error', (e) => settle(() => reject(e)));
+      });
+      req.on('error', (e) => settle(() => reject(e)));
     };
     request(url);
   });
@@ -466,7 +481,15 @@ export async function getInfo(url: string, extraFlags: string[] = []): Promise<a
     ...extraFlags,
     url,
   ]);
-  return JSON.parse(stdout);
+  try {
+    return JSON.parse(stdout);
+  } catch {
+    const preview = (stdout || '').trim().slice(0, 200);
+    throw new Error(
+      `yt-dlp returned invalid JSON. This usually means the video is unavailable, ` +
+      `geo-restricted, or requires authentication.\n\nRaw output: ${preview}`,
+    );
+  }
 }
 
 export async function download(

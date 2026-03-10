@@ -3,6 +3,7 @@ import { ICredentialType, INodeProperties } from 'n8n-workflow';
 export class YouTubeDLCookies implements ICredentialType {
   name = 'youTubeDLCookies';
   displayName = 'YouTube Cookies';
+  documentationUrl = 'https://github.com/prakashmaheshwaran/n8n-nodes-youtube-dl#cookie-authentication';
   properties: INodeProperties[] = [
     {
       displayName: 'Cookies JSON',

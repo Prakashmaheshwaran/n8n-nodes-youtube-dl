@@ -4,17 +4,23 @@
 [![npm downloads](https://img.shields.io/npm/dm/n8n-nodes-youtube-dl.svg)](https://www.npmjs.com/package/n8n-nodes-youtube-dl)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-An n8n community node for downloading YouTube videos and audio. Powered by [yt-dlp](https://github.com/yt-dlp/yt-dlp) — install the node, and it just works. No Python, no FFmpeg, no Docker modifications needed.
+An n8n community node for downloading videos, audio, transcripts, and subtitles from YouTube and 1000+ other sites. Powered by [yt-dlp](https://github.com/yt-dlp/yt-dlp) — install the node, and it just works. No Python, no FFmpeg, no Docker modifications needed.
 
 ## Features
 
-- **Download Video** — Save YouTube videos in MP4 or best available format
+- **Download Video** — Save videos in MP4 or any resolution (360p to 4K)
 - **Download Audio** — Extract audio tracks (WebM, M4A, Opus)
 - **Get Video Info** — Fetch metadata, thumbnails, formats, and stats without downloading
+- **Get Transcript** — Extract video transcripts/subtitles as structured text with timestamps
+- **Download Subtitles** — Save subtitle files in SRT, VTT, or ASS formats
+- **1000+ Sites** — Works with YouTube, Vimeo, Twitter/X, TikTok, and [many more](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md)
 - **Plug-and-Play** — Auto-downloads the latest yt-dlp binary on install; auto-fixes Alpine/musl Docker environments at runtime
+- **Resolution Selection** — Choose from Highest, 4K, 1440p, 1080p, 720p, 480p, 360p, or Lowest
 - **Proxy Support** — Route requests through HTTP, HTTPS, or SOCKS5 proxies
 - **Cookie Authentication** — Access age-restricted or private videos with browser cookies
+- **Custom yt-dlp Flags** — Pass any yt-dlp flags for advanced use cases (rate limiting, SponsorBlock, geo-bypass, etc.)
 - **Zero Runtime Dependencies** — The npm package has no `node_modules` dependencies at all
+- **Memory Efficient** — Streams large files instead of buffering them in memory
 
 ## Installation
 
@@ -39,34 +45,51 @@ The yt-dlp binary downloads automatically during `npm install`. If the download 
 
 1. Add the **YouTube Downloader** node to your workflow
 2. Set the operation to **Download Video**
-3. Enter a YouTube URL (or just a video ID like `dQw4w9WgXcQ`)
-4. Choose quality: **Highest** or **Lowest**
+3. Enter a video URL (YouTube, Vimeo, Twitter, TikTok, or any supported site)
+4. Choose resolution: **Highest**, **4K**, **1080p**, **720p**, **480p**, **360p**, or **Lowest**
 5. The node outputs binary data you can pass to **Write Binary File**, **S3**, **Google Drive**, etc.
 
 ### Download Audio
 
 1. Set the operation to **Download Audio**
-2. Enter the YouTube URL
+2. Enter the video URL
 3. Choose quality: **Highest** or **Lowest**
 4. Audio is extracted in the best available format (WebM, M4A, Opus)
 
 ### Get Video Info
 
 1. Set the operation to **Get Video Info**
-2. Enter the YouTube URL
+2. Enter the video URL
 3. Returns JSON metadata: title, description, duration, view count, upload date, channel info, thumbnails, and all available formats with codecs, bitrates, and resolutions
+
+### Get Transcript
+
+1. Set the operation to **Get Transcript**
+2. Enter the video URL
+3. Choose subtitle language (default: `en`)
+4. Returns the full transcript as text plus timestamped segments — perfect for AI summarization, search indexing, or content repurposing
+
+### Download Subtitles
+
+1. Set the operation to **Download Subtitles**
+2. Enter the video URL
+3. Choose language and format (SRT, VTT, or ASS)
+4. Returns the subtitle file as binary data
 
 ## Node Parameters
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| **Operation** | Select | Download Video, Download Audio, or Get Video Info |
-| **Video URL** | String | YouTube URL, short URL, or 11-character video ID |
-| **Video Quality** | Select | Highest or Lowest (video operations only) |
-| **Audio Quality** | Select | Highest or Lowest (audio operation only) |
+| **Operation** | Select | Download Video, Download Audio, Get Video Info, Get Transcript, or Download Subtitles |
+| **Video URL** | String | YouTube URL, video ID, or any URL supported by yt-dlp |
+| **Video Quality** | Select | Highest, 4K, 1440p, 1080p, 720p, 480p, 360p, or Lowest |
+| **Audio Quality** | Select | Highest or Lowest |
+| **Language** | String | Subtitle/transcript language code (e.g. `en`, `es`, `fr`, `de`, `ja`) |
+| **Subtitle Format** | Select | SRT, VTT, or ASS |
 | **Output Filename** | String | Custom filename (optional — auto-generated from title if blank) |
-| **Proxy** | Toggle | Enable proxy routing |
+| **Use Proxy** | Toggle | Enable proxy routing |
 | **Proxy URL** | String | `http://user:pass@host:port` or `socks5://host:port` |
+| **Custom yt-dlp Flags** | String | Additional yt-dlp flags (e.g. `--limit-rate 1M --geo-bypass`) |
 
 ## Cookie Authentication
 
@@ -79,7 +102,7 @@ For age-restricted or private videos, configure **YouTube Cookies** credentials:
 
 ## How It Works
 
-The node uses [yt-dlp](https://github.com/yt-dlp/yt-dlp), the most actively maintained YouTube downloader. Here's how the binary management works:
+The node uses [yt-dlp](https://github.com/yt-dlp/yt-dlp), the most actively maintained video downloader. Here's how the binary management works:
 
 1. **At install time** (`npm install`): Downloads the latest standalone yt-dlp binary for your platform
 2. **At runtime** (if the binary is missing): Auto-downloads and caches the binary with curl/wget/https fallbacks
@@ -128,6 +151,8 @@ Every operation returns structured JSON:
 
 The **Get Video Info** operation returns additional fields: description, upload date, channel URL, subscriber count, thumbnails, all available formats with codec/bitrate/resolution details, categories, tags, and live status.
 
+The **Get Transcript** operation returns the full transcript text, timestamped segments with start/end times, and word count.
+
 ## Environment Variables
 
 | Variable | Description |
@@ -157,10 +182,17 @@ npm install n8n-nodes-youtube-dl
 YouTube may block requests from server IPs. Solutions:
 - Configure **YouTube Cookies** credentials (see above)
 - Use a **proxy** (residential proxies work best)
+- Use the custom flags field to pass `--cookies-from-browser` if running locally
+
+### No subtitles found
+
+Not all videos have subtitles. Try:
+- A different language code (e.g. `en`, `en-US`, `auto`)
+- The auto-generated subtitle option (enabled by default)
 
 ## Legal Notice
 
-Downloading YouTube videos may violate YouTube's Terms of Service. This tool is intended for:
+Downloading videos may violate the Terms of Service of some platforms. This tool is intended for:
 - Downloading your own content
 - Videos with Creative Commons licenses
 - Content you have explicit permission to download
@@ -183,5 +215,5 @@ npm link  # Link to your local n8n for testing
 
 ## Credits
 
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) — The powerful YouTube downloader that powers this node
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp) — The powerful video downloader that powers this node
 - Built following [n8n community node](https://docs.n8n.io/integrations/creating-nodes/) best practices

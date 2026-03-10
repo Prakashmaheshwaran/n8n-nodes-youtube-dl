@@ -12,3 +12,7 @@ coverage
 # yt-dlp binaries (downloaded at install time)
 bin/*
 !bin/.gitkeep
+
+# npm pack artifacts
+*.tgz
+.npmrc

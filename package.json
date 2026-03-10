@@ -1,7 +1,7 @@
 {
   "name": "n8n-nodes-youtube-dl",
-  "version": "2.2.0",
-  "description": "n8n node to download YouTube videos & audio via yt-dlp — plug-and-play, works in Docker",
+  "version": "3.0.0",
+  "description": "n8n node to download videos, audio, transcripts & subtitles via yt-dlp — plug-and-play, 1000+ sites, works in Docker",
   "keywords": [
     "n8n-community-node-package",
     "n8n",
@@ -11,6 +11,8 @@
     "download",
     "video",
     "audio",
+    "transcript",
+    "subtitles",
     "downloader",
     "automation",
     "workflow",
@@ -61,5 +63,8 @@
   "dependencies": {},
   "peerDependencies": {
     "n8n-workflow": "*"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
