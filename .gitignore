@@ -8,3 +8,7 @@ dist
 *.tsbuildinfo
 coverage
 .nyc_output
+
+# yt-dlp binaries (downloaded at install time)
+bin/*
+!bin/.gitkeep
