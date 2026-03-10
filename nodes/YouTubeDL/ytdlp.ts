@@ -5,6 +5,9 @@
  * If no binary is found at call time, it auto-downloads the correct
  * standalone build from GitHub — so the node is truly plug-and-play
  * even when postinstall didn't run (Docker, pnpm, etc.).
+ *
+ * Alpine Linux (musl): The glibc-linked standalone binary won't run
+ * without `gcompat`. We detect this and provide clear instructions.
  */
 
 import { execFile, execFileSync } from 'child_process';
@@ -33,6 +36,53 @@ function getCandidateDirs(): string[] {
 }
 
 // ── Platform helpers ────────────────────────────────────────
+
+function isAlpine(): boolean {
+  try {
+    return fs.existsSync('/etc/alpine-release');
+  } catch {
+    return false;
+  }
+}
+
+function isMusl(): boolean {
+  if (process.platform !== 'linux') return false;
+  try {
+    // Check if ldd points to musl
+    const out = execFileSync('ldd', ['--version'], {
+      timeout: 5_000,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return out.toLowerCase().includes('musl');
+  } catch (e: any) {
+    // musl's ldd prints to stderr and exits with error
+    const stderr = e?.stderr?.toString() || '';
+    return stderr.toLowerCase().includes('musl');
+  }
+}
+
+function hasGcompat(): boolean {
+  try {
+    return fs.existsSync('/lib/ld-linux-x86-64.so.2') ||
+           fs.existsSync('/lib64/ld-linux-x86-64.so.2');
+  } catch {
+    return false;
+  }
+}
+
+function hasPython3(): boolean {
+  try {
+    const out = execFileSync('python3', ['--version'], {
+      timeout: 5_000,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return out.includes('3.');
+  } catch {
+    return false;
+  }
+}
 
 function getStandaloneName(): string | null {
   const p = process.platform;
@@ -70,13 +120,21 @@ function findExistingBinary(): string | null {
 
   const fname = binaryFilename();
 
-  // 2. Check all candidate directories
+  // 2. Check all candidate directories for a working binary
   for (const dir of getCandidateDirs()) {
     const candidate = path.join(dir, fname);
-    if (fs.existsSync(candidate)) return candidate;
+    if (fs.existsSync(candidate) && testBinary(candidate)) return candidate;
   }
 
-  // 3. System yt-dlp on PATH
+  // 3. Check for zipapp + Python
+  if (hasPython3()) {
+    for (const dir of getCandidateDirs()) {
+      const zipapp = path.join(dir, 'yt-dlp-zipapp');
+      if (fs.existsSync(zipapp) && testBinary(zipapp)) return zipapp;
+    }
+  }
+
+  // 4. System yt-dlp on PATH
   if (testBinary('yt-dlp')) return 'yt-dlp';
 
   return null;
@@ -107,27 +165,21 @@ function httpsGet(url: string): Promise<Buffer> {
   });
 }
 
-async function downloadBinary(): Promise<string> {
+/** Try to download and install the standalone binary */
+async function tryStandalone(fname: string): Promise<string | null> {
   const name = getStandaloneName();
-  if (!name) {
-    throw new Error(
-      `Unsupported platform: ${process.platform}/${process.arch}. ` +
-        'Install yt-dlp manually and set YT_DLP_PATH.',
-    );
-  }
+  if (!name) return null;
 
   const url = `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${name}`;
-  const fname = binaryFilename();
 
-  // Try each candidate directory until one is writable
   for (const dir of getCandidateDirs()) {
     try {
       fs.mkdirSync(dir, { recursive: true });
 
       // Quick write test
-      const testFile = path.join(dir, '.write-test');
-      fs.writeFileSync(testFile, 'ok');
-      fs.unlinkSync(testFile);
+      const wt = path.join(dir, '.write-test');
+      fs.writeFileSync(wt, 'ok');
+      fs.unlinkSync(wt);
 
       const dest = path.join(dir, fname);
       const buffer = await httpsGet(url);
@@ -137,26 +189,138 @@ async function downloadBinary(): Promise<string> {
         fs.chmodSync(dest, 0o755);
       }
 
-      // Verify it actually runs
-      if (testBinary(dest)) {
-        return dest;
-      }
+      if (testBinary(dest)) return dest;
 
-      // Binary doesn't run (e.g. Alpine/musl) — clean up and try next
+      // Didn't work — clean up
       try { fs.unlinkSync(dest); } catch { /* ignore */ }
     } catch {
-      // Directory not writable or download failed — try next
+      // Not writable or download failed — try next dir
     }
   }
 
-  throw new Error(
-    'Failed to download yt-dlp binary. Possible causes:\n' +
-      '  • No internet access from this environment\n' +
-      '  • Alpine Linux (install gcompat: apk add gcompat)\n' +
-      '  • All candidate directories are read-only\n' +
-      'Fix: install yt-dlp manually (pip install yt-dlp, or apk add yt-dlp)\n' +
-      'and set the YT_DLP_PATH environment variable.',
-  );
+  return null;
+}
+
+/** Try to download the Python zipapp (needs Python 3.8+) */
+async function tryZipapp(): Promise<string | null> {
+  if (!hasPython3()) return null;
+
+  const url = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp';
+
+  for (const dir of getCandidateDirs()) {
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+
+      const wt = path.join(dir, '.write-test');
+      fs.writeFileSync(wt, 'ok');
+      fs.unlinkSync(wt);
+
+      const dest = path.join(dir, 'yt-dlp-zipapp');
+      const buffer = await httpsGet(url);
+      fs.writeFileSync(dest, buffer);
+      fs.chmodSync(dest, 0o755);
+
+      if (testBinary(dest)) return dest;
+
+      try { fs.unlinkSync(dest); } catch { /* ignore */ }
+    } catch {
+      // try next dir
+    }
+  }
+
+  return null;
+}
+
+/** Try to install via pip */
+async function tryPipInstall(): Promise<string | null> {
+  if (!hasPython3()) return null;
+
+  try {
+    execFileSync('pip3', ['install', '--user', 'yt-dlp'], {
+      timeout: 120_000,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    if (testBinary('yt-dlp')) return 'yt-dlp';
+
+    // Check common pip --user bin paths
+    const userBin = path.join(os.homedir(), '.local', 'bin', 'yt-dlp');
+    if (fs.existsSync(userBin) && testBinary(userBin)) return userBin;
+  } catch {
+    // pip not available or install failed
+  }
+
+  return null;
+}
+
+async function downloadBinary(): Promise<string> {
+  const fname = binaryFilename();
+  const alpine = isAlpine();
+  const musl = isMusl();
+  const diagnostics: string[] = [];
+
+  // Strategy 1: Standalone binary (works on glibc Linux, macOS, Windows)
+  diagnostics.push('Trying standalone binary...');
+  const standalone = await tryStandalone(fname);
+  if (standalone) return standalone;
+
+  if (musl || alpine) {
+    diagnostics.push('Standalone binary failed (Alpine/musl detected — needs gcompat).');
+  } else {
+    diagnostics.push('Standalone binary failed.');
+  }
+
+  // Strategy 2: Python zipapp (works if Python 3.8+ available)
+  diagnostics.push('Trying Python zipapp...');
+  const zipapp = await tryZipapp();
+  if (zipapp) return zipapp;
+  diagnostics.push(hasPython3() ? 'Zipapp failed.' : 'No Python3 found, skipping zipapp.');
+
+  // Strategy 3: pip install (works if pip available)
+  diagnostics.push('Trying pip3 install...');
+  const pip = await tryPipInstall();
+  if (pip) return pip;
+  diagnostics.push('pip install failed or unavailable.');
+
+  // ── Build a helpful error message ─────────────────────────
+  const isDocker = fs.existsSync('/.dockerenv') ||
+    ((): boolean => { try { return fs.readFileSync('/proc/1/cgroup', 'utf-8').includes('docker'); } catch { return false; } })();
+
+  let errorMsg = 'yt-dlp binary could not be installed automatically.\n\n';
+  errorMsg += `Platform: ${process.platform}/${process.arch}`;
+  if (alpine) errorMsg += ' (Alpine Linux)';
+  if (musl) errorMsg += ' (musl libc)';
+  if (isDocker) errorMsg += ' (Docker)';
+  errorMsg += '\n';
+  errorMsg += `Diagnostics: ${diagnostics.join(' ')}\n\n`;
+
+  if ((alpine || musl) && isDocker) {
+    errorMsg += '═══ FIX FOR DOCKER (Alpine) ═══\n';
+    errorMsg += 'Run this command on your host machine:\n\n';
+    errorMsg += '  docker exec -u root <CONTAINER> apk add --no-cache gcompat\n';
+    errorMsg += '  docker restart <CONTAINER>\n\n';
+    errorMsg += 'For a permanent fix, use a custom Dockerfile:\n\n';
+    errorMsg += '  FROM n8nio/n8n:latest\n';
+    errorMsg += '  USER root\n';
+    errorMsg += '  RUN apk add --no-cache gcompat\n';
+    errorMsg += '  USER node\n\n';
+    errorMsg += 'Then rebuild: docker compose build && docker compose up -d\n';
+  } else if (alpine || musl) {
+    errorMsg += '═══ FIX FOR ALPINE LINUX ═══\n';
+    errorMsg += 'Install gcompat: sudo apk add --no-cache gcompat\n';
+    errorMsg += 'Then restart n8n.\n';
+  } else if (isDocker) {
+    errorMsg += '═══ FIX FOR DOCKER ═══\n';
+    errorMsg += 'Install yt-dlp in your container:\n';
+    errorMsg += '  docker exec -u root <CONTAINER> apt-get update && apt-get install -y yt-dlp\n';
+    errorMsg += 'Or add it to your Dockerfile.\n';
+  } else {
+    errorMsg += '═══ HOW TO FIX ═══\n';
+    errorMsg += 'Option 1: Install yt-dlp (https://github.com/yt-dlp/yt-dlp#installation)\n';
+    errorMsg += 'Option 2: Set YT_DLP_PATH=/path/to/yt-dlp environment variable\n';
+  }
+
+  throw new Error(errorMsg);
 }
 
 // ── Cached binary with auto-download ────────────────────────
