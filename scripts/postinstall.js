@@ -1,12 +1,10 @@
 /**
- * Postinstall script: downloads standalone yt-dlp binary.
+ * Postinstall: pre-downloads the yt-dlp standalone binary.
  *
- * Strategy (tries in order):
- *   1. Standalone binary (no Python needed, ~30-40 MB)
- *   2. Python zipapp (needs Python 3.9+, ~3 MB)
- *   3. System yt-dlp already on PATH
+ * This is a best-effort optimization — if it fails, the node's runtime
+ * code (ytdlp.ts) will download and set up the binary on first use.
  *
- * Never fails the install — just warns if nothing works.
+ * Never fails the install — just warns if the download doesn't work.
  */
 
 const fs = require('fs');
@@ -23,32 +21,24 @@ function getStandaloneName() {
   const a = process.arch;
   if (p === 'linux') return a === 'arm64' ? 'yt-dlp_linux_aarch64' : 'yt-dlp_linux';
   if (p === 'darwin') return 'yt-dlp_macos';
-  if (p === 'win32') return a === 'arm64' ? 'yt-dlp.exe' : 'yt-dlp.exe';
+  if (p === 'win32') return 'yt-dlp.exe';
   return null;
 }
 
-function getZipappName() {
-  if (process.platform === 'win32') return 'yt-dlp';
-  return 'yt-dlp';
+function binaryFilename() {
+  return process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
 }
 
-function destPath(variant) {
-  const ext = process.platform === 'win32' ? '.exe' : '';
-  const name = variant === 'standalone' ? `yt-dlp${ext}` : `yt-dlp-zipapp${ext}`;
-  return path.join(BIN_DIR, name);
-}
-
-// ── Download with redirect following ────────────────────────
+// ── Download helper ─────────────────────────────────────────
 
 async function download(url, dest) {
-  // Use built-in fetch (Node 20+) with redirect following
   const res = await fetch(url, {
     redirect: 'follow',
     headers: { 'User-Agent': 'n8n-nodes-youtube-dl/postinstall' },
   });
 
   if (!res.ok) {
-    throw new Error(`HTTP ${res.status} ${res.statusText} for ${url}`);
+    throw new Error(`HTTP ${res.status} ${res.statusText}`);
   }
 
   const buffer = Buffer.from(await res.arrayBuffer());
@@ -75,99 +65,51 @@ function testBinary(binPath) {
   }
 }
 
-function hasPython() {
-  try {
-    const out = execFileSync('python3', ['--version'], {
-      timeout: 5000,
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    return out.includes('3.');
-  } catch {
-    return false;
-  }
-}
-
 // ── Main ────────────────────────────────────────────────────
 
 async function main() {
   fs.mkdirSync(BIN_DIR, { recursive: true });
 
-  // Skip if user set YT_DLP_PATH (they manage their own binary)
+  // Skip if user manages their own binary
   if (process.env.YT_DLP_PATH) {
     console.log(`[yt-dlp] Using user-provided binary: ${process.env.YT_DLP_PATH}`);
     return;
   }
 
-  // Check if standalone already works
-  const standaloneDest = destPath('standalone');
-  if (fs.existsSync(standaloneDest) && testBinary(standaloneDest)) {
-    console.log('[yt-dlp] Standalone binary already installed and working.');
+  // Check if binary already works
+  const dest = path.join(BIN_DIR, binaryFilename());
+  if (fs.existsSync(dest) && testBinary(dest)) {
+    console.log('[yt-dlp] Binary already installed and working.');
     return;
   }
 
-  // Strategy 1: standalone binary (no Python needed)
+  // Download standalone binary
   const standaloneName = getStandaloneName();
-  if (standaloneName) {
-    const url = `${RELEASE_BASE}/${standaloneName}`;
-    console.log(`[yt-dlp] Downloading standalone binary for ${process.platform}/${process.arch}...`);
-    try {
-      await download(url, standaloneDest);
-      if (testBinary(standaloneDest)) {
-        console.log('[yt-dlp] Standalone binary installed successfully.');
-        return;
-      }
-      console.log('[yt-dlp] Standalone binary downloaded but failed to run (likely musl/Alpine).');
-      fs.unlinkSync(standaloneDest);
-    } catch (err) {
-      console.log(`[yt-dlp] Standalone download failed: ${err.message}`);
-    }
+  if (!standaloneName) {
+    console.log(`[yt-dlp] Unsupported platform: ${process.platform}/${process.arch}`);
+    console.log('[yt-dlp] The node will attempt to download at runtime.');
+    return;
   }
 
-  // Strategy 2: Python zipapp (needs Python 3.9+)
-  if (hasPython()) {
-    const zipappDest = destPath('zipapp');
-    const zipappUrl = `${RELEASE_BASE}/${getZipappName()}`;
-    console.log('[yt-dlp] Python found. Downloading zipapp fallback...');
-    try {
-      await download(zipappUrl, zipappDest);
-      if (testBinary(zipappDest)) {
-        console.log('[yt-dlp] Python zipapp installed successfully.');
-        return;
-      }
-      fs.unlinkSync(zipappDest);
-    } catch (err) {
-      console.log(`[yt-dlp] Zipapp download failed: ${err.message}`);
-    }
-  }
+  const url = `${RELEASE_BASE}/${standaloneName}`;
+  console.log(`[yt-dlp] Downloading binary for ${process.platform}/${process.arch}...`);
 
-  // Strategy 3: check system yt-dlp
   try {
-    const sysPath = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
-    if (testBinary(sysPath)) {
-      console.log('[yt-dlp] Found system yt-dlp on PATH. Will use that.');
+    await download(url, dest);
+    if (testBinary(dest)) {
+      console.log('[yt-dlp] Binary installed successfully.');
       return;
     }
-  } catch {
-    // Not on PATH
+    // Binary downloaded but won't run here (e.g. musl/Alpine).
+    // That's fine — the runtime code has a musl compatibility shim.
+    console.log('[yt-dlp] Binary downloaded. Compatibility will be handled at runtime.');
+  } catch (err) {
+    console.log(`[yt-dlp] Download skipped: ${err.message}`);
+    console.log('[yt-dlp] The node will download the binary on first use.');
   }
-
-  // Nothing worked
-  console.warn('\n' +
-    '╔══════════════════════════════════════════════════════════════╗\n' +
-    '║  WARNING: Could not install yt-dlp binary.                 ║\n' +
-    '║                                                            ║\n' +
-    '║  The YouTube Downloader node needs yt-dlp to work.         ║\n' +
-    '║  Options:                                                  ║\n' +
-    '║    • Install Python 3.9+ and reinstall this package        ║\n' +
-    '║    • Install yt-dlp manually: pip install yt-dlp           ║\n' +
-    '║    • Set YT_DLP_PATH=/path/to/yt-dlp environment variable  ║\n' +
-    '║    • For Alpine Docker: apk add python3 gcompat            ║\n' +
-    '╚══════════════════════════════════════════════════════════════╝\n'
-  );
 }
 
 main().catch((err) => {
-  console.warn(`[yt-dlp] postinstall warning: ${err.message}`);
+  console.warn(`[yt-dlp] postinstall: ${err.message}`);
   // Never fail the install
 });

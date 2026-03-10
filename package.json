@@ -1,20 +1,26 @@
 {
   "name": "n8n-nodes-youtube-dl",
-  "version": "2.1.4",
-  "description": "YouTube video/audio downloader for n8n using yt-dlp",
+  "version": "2.2.0",
+  "description": "n8n node to download YouTube videos & audio via yt-dlp — plug-and-play, works in Docker",
   "keywords": [
     "n8n-community-node-package",
+    "n8n",
     "youtube",
+    "youtube-dl",
+    "yt-dlp",
     "download",
     "video",
     "audio",
-    "ytdl"
+    "downloader",
+    "automation",
+    "workflow",
+    "docker"
   ],
   "license": "MIT",
   "homepage": "https://github.com/prakashmaheshwaran/n8n-nodes-youtube-dl",
   "author": {
     "name": "Prakash Maheshwaran",
-    "email": "your-email@example.com"
+    "email": "diinoprakash@gmail.com"
   },
   "repository": {
     "type": "git",
@@ -27,8 +33,7 @@
     "format": "prettier nodes --write",
     "lint": "eslint nodes/**/*.ts --fix",
     "prepublishOnly": "npm run build",
-    "postinstall": "node scripts/postinstall.js",
-    "test": "jest"
+    "postinstall": "node scripts/postinstall.js"
   },
   "files": [
     "dist",
