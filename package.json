@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-youtube-dl",
-  "version": "2.1.2",
+  "version": "2.1.3",
   "description": "YouTube video/audio downloader for n8n using yt-dlp",
   "keywords": [
     "n8n-community-node-package",
