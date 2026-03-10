@@ -1,7 +1,7 @@
 {
   "name": "n8n-nodes-youtube-dl",
-  "version": "1.0.1",
-  "description": "YouTube video/audio downloader for n8n (no binary required)",
+  "version": "2.0.0",
+  "description": "YouTube video/audio downloader for n8n using yt-dlp",
   "keywords": [
     "n8n-community-node-package",
     "youtube",
@@ -27,14 +27,19 @@
     "format": "prettier nodes --write",
     "lint": "eslint nodes/**/*.ts --fix",
     "prepublishOnly": "npm run build",
+    "postinstall": "node scripts/postinstall.js",
     "test": "jest"
   },
   "files": [
-    "dist"
+    "dist",
+    "scripts",
+    "bin"
   ],
   "n8n": {
     "n8nNodesApiVersion": 1,
-    "credentials": [],
+    "credentials": [
+      "dist/credentials/YouTubeDLCookies.credentials.js"
+    ],
     "nodes": [
       "dist/nodes/YouTubeDL/YouTubeDL.node.js"
     ]
@@ -42,18 +47,14 @@
   "devDependencies": {
     "@types/node": "^20.8.0",
     "@typescript-eslint/eslint-plugin": "^8.57.0",
-    "@typescript-eslint/parser": "^6.7.0",
+    "@typescript-eslint/parser": "^8.57.0",
     "eslint-plugin-n8n-nodes-base": "^1.16.0",
     "gulp": "^4.0.2",
     "n8n-workflow": "^1.0.0",
     "prettier": "^3.0.3",
     "typescript": "^5.2.2"
   },
-  "dependencies": {
-    "@distube/ytdl-core": "^4.15.9",
-    "https-proxy-agent": "^7.0.6",
-    "socks-proxy-agent": "^8.0.5"
-  },
+  "dependencies": {},
   "peerDependencies": {
     "n8n-workflow": "*"
   }
