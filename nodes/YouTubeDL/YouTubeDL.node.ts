@@ -5,273 +5,371 @@ import {
   INodeTypeDescription,
   NodeOperationError,
 } from 'n8n-workflow';
-import { Innertube } from 'youtubei.js';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
+
+// youtube-dl-exec is ESM-first but has CJS compat
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const youtubeDlExec = require('youtube-dl-exec');
+
+// ──────────────────────────────────────────────────────────────
+// Helpers
+// ──────────────────────────────────────────────────────────────
+
+function normalizeUrl(input: string): string {
+  const trimmed = input.trim();
+  if (/^[a-zA-Z0-9_-]{11}$/.test(trimmed)) {
+    return `https://www.youtube.com/watch?v=${trimmed}`;
+  }
+  return trimmed;
+}
+
+function isValidYouTubeInput(input: string): boolean {
+  const trimmed = input.trim();
+  if (/(?:youtube\.com\/(?:watch|embed|shorts|live)|youtu\.be\/)/.test(trimmed)) return true;
+  if (/^[a-zA-Z0-9_-]{11}$/.test(trimmed)) return true;
+  return false;
+}
 
 function extractVideoId(input: string): string {
   const trimmed = input.trim();
-
-  // Handle YouTube URLs
   const urlMatch = trimmed.match(
     /(?:youtube\.com\/(?:watch\?.*v=|embed\/|shorts\/|live\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/,
   );
   if (urlMatch) return urlMatch[1];
-
-  // Handle bare video ID
   if (/^[a-zA-Z0-9_-]{11}$/.test(trimmed)) return trimmed;
-
-  throw new Error(`Could not extract video ID from: ${input}`);
+  return trimmed.slice(0, 20); // fallback for display
 }
 
-function isValidYouTubeInput(input: string): boolean {
-  try {
-    extractVideoId(input);
-    return true;
-  } catch {
-    return false;
+/** Write cookies (EditThisCookie JSON format) to a Netscape cookie file for yt-dlp */
+function writeCookieFile(cookies: any[]): string {
+  const tmpFile = path.join(os.tmpdir(), `ytdl_cookies_${Date.now()}.txt`);
+  const lines = ['# Netscape HTTP Cookie File'];
+
+  for (const c of cookies) {
+    const domain = c.domain || '.youtube.com';
+    const includeSubdomains = domain.startsWith('.') ? 'TRUE' : 'FALSE';
+    const cookiePath = c.path || '/';
+    const secure = c.secure ? 'TRUE' : 'FALSE';
+    const expiry = c.expirationDate ? String(Math.floor(c.expirationDate)) : '0';
+    lines.push(
+      `${domain}\t${includeSubdomains}\t${cookiePath}\t${secure}\t${expiry}\t${c.name}\t${c.value}`,
+    );
   }
+
+  fs.writeFileSync(tmpFile, lines.join('\n') + '\n');
+  return tmpFile;
 }
 
-async function collectStreamWithTimeout(
-  stream: ReadableStream<Uint8Array>,
-  timeoutMs: number,
-): Promise<Buffer> {
-  const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
-  let timer: ReturnType<typeof setTimeout>;
+/** Build common yt-dlp flags from node parameters and credentials */
+async function getCommonFlags(
+  context: IExecuteFunctions,
+  itemIndex: number,
+): Promise<Record<string, any>> {
+  const flags: Record<string, any> = {
+    noCheckCertificates: true,
+    noWarnings: true,
+  };
 
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      reader.cancel();
-      reject(new Error(`Download timed out after ${timeoutMs / 1000} seconds`));
-    }, timeoutMs);
-  });
-
-  const collectPromise = (async () => {
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
-      }
-      return Buffer.concat(chunks);
-    } finally {
-      clearTimeout(timer!);
+  // Proxy
+  const useProxy = context.getNodeParameter('useProxy', itemIndex) as boolean;
+  if (useProxy) {
+    const proxyUrl = context.getNodeParameter('proxyUrl', itemIndex) as string;
+    if (proxyUrl) {
+      flags.proxy = proxyUrl;
     }
-  })();
+  }
 
-  return Promise.race([collectPromise, timeoutPromise]);
-}
-
-async function createInnertubeClient(context: IExecuteFunctions): Promise<Innertube> {
-  // Get cookies from credentials
-  let cookieString: string | undefined;
+  // Cookies
   try {
     const credentials = await context.getCredentials('youTubeDLCookies');
     if (credentials?.cookiesJson) {
       const parsed = JSON.parse(credentials.cookiesJson as string);
       if (Array.isArray(parsed) && parsed.length > 0) {
-        cookieString = parsed.map((c: any) => `${c.name}=${c.value}`).join('; ');
+        flags.cookies = writeCookieFile(parsed);
       }
     }
   } catch {
     // No credentials configured
   }
 
-  // Get proxy settings
-  const useProxy = context.getNodeParameter('useProxy', 0) as boolean;
-  let proxyUrl: string | undefined;
-  if (useProxy) {
-    proxyUrl = context.getNodeParameter('proxyUrl', 0) as string;
-    if (proxyUrl?.startsWith('socks')) {
-      throw new Error(
-        'SOCKS proxies are not supported in this version. Please use an HTTP or HTTPS proxy.',
-      );
-    }
-    try {
-      new URL(proxyUrl);
-    } catch {
-      throw new Error(`Invalid proxy URL: ${proxyUrl}`);
-    }
-  }
-
-  const options: any = {};
-
-  if (cookieString) {
-    options.cookie = cookieString;
-  }
-
-  if (proxyUrl) {
-    // undici is bundled with Node.js 20+ (required by n8n)
-    const { ProxyAgent } = require('undici');
-    const dispatcher = new ProxyAgent(proxyUrl);
-    options.fetch = (input: any, init: any) => {
-      return fetch(input, { ...init, dispatcher } as any);
-    };
-  }
-
-  return Innertube.create(options);
+  return flags;
 }
 
+/** Clean up temp cookie file if one was created */
+function cleanupFlags(flags: Record<string, any>) {
+  if (flags.cookies) {
+    try {
+      fs.unlinkSync(flags.cookies);
+    } catch {
+      // Ignore cleanup errors
+    }
+  }
+}
+
+/** Find a downloaded file matching a base path (yt-dlp adds the extension) */
+function findOutputFile(tmpBase: string): string | undefined {
+  const dir = path.dirname(tmpBase);
+  const base = path.basename(tmpBase);
+  const files = fs.readdirSync(dir).filter((f) => f.startsWith(base));
+  if (files.length === 0) return undefined;
+  return path.join(dir, files[0]);
+}
+
+// ──────────────────────────────────────────────────────────────
+// Operations
+// ──────────────────────────────────────────────────────────────
+
 async function downloadVideo(
-  innertube: Innertube,
   context: IExecuteFunctions,
+  videoUrl: string,
   videoId: string,
   itemIndex: number,
   returnData: INodeExecutionData[],
 ): Promise<void> {
   const videoQuality = context.getNodeParameter('videoQuality', itemIndex) as string;
-  const videoFilter = context.getNodeParameter('videoFilter', itemIndex) as string;
   const customFilename = context.getNodeParameter('outputFilename', itemIndex) as string;
-  const timeoutSeconds = context.getNodeParameter('timeoutSeconds', itemIndex, 300) as number;
   const useProxy = context.getNodeParameter('useProxy', itemIndex) as boolean;
 
-  const info = await innertube.getInfo(videoId);
-  const title = info.basic_info?.title || 'video';
-  const filename = customFilename || `${title.replace(/[^a-z0-9]/gi, '_')}_${videoId}`;
+  const flags = await getCommonFlags(context, itemIndex);
+  const tmpBase = path.join(
+    os.tmpdir(),
+    `ytdl_video_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+  );
 
-  // Map quality options
-  const quality = videoQuality === 'lowest' || videoQuality === 'lowestaudio'
-    ? 'bestefficiency'
-    : 'best';
+  try {
+    // Get metadata first
+    const info = await youtubeDlExec(videoUrl, {
+      ...flags,
+      dumpSingleJson: true,
+      noDownload: true,
+    });
 
-  // Map filter to download type
-  let type: string;
-  switch (videoFilter) {
-    case 'videoonly':
-      type = 'video';
-      break;
-    case 'audioonly':
-      type = 'audio';
-      break;
-    default:
-      type = 'video+audio';
-  }
+    // Build format string
+    let format: string;
+    if (videoQuality === 'lowest') {
+      format = 'worst[ext=mp4]/worst';
+    } else {
+      format = 'best[ext=mp4]/best';
+    }
 
-  const stream = await innertube.download(videoId, { quality, type } as any);
-  const buffer = await collectStreamWithTimeout(stream, timeoutSeconds * 1000);
-  const base64Data = buffer.toString('base64');
+    // Download
+    await youtubeDlExec(videoUrl, {
+      ...flags,
+      format,
+      output: `${tmpBase}.%(ext)s`,
+    });
 
-  const mimeType = videoFilter === 'audioonly' ? 'audio/webm' : 'video/mp4';
-  const extension = videoFilter === 'audioonly' ? 'webm' : 'mp4';
+    // Find the output file
+    const outputFile = findOutputFile(tmpBase);
+    if (!outputFile) {
+      throw new Error('Download completed but output file not found');
+    }
 
-  returnData.push({
-    json: {
-      success: true,
-      videoId,
-      title,
-      author: info.basic_info?.author || '',
-      lengthSeconds: String(info.basic_info?.duration || 0),
-      viewCount: String(info.basic_info?.view_count || 0),
-      downloadType: 'video',
-      fileSize: buffer.length,
-      proxyUsed: useProxy,
-    },
-    binary: {
-      [filename]: {
-        data: base64Data,
-        mimeType,
-        fileExtension: extension,
-        fileName: `${filename}.${extension}`,
+    const buffer = fs.readFileSync(outputFile);
+    const ext = path.extname(outputFile).slice(1) || 'mp4';
+    const title = info.title || 'video';
+    const filename = customFilename || `${title.replace(/[^a-z0-9]/gi, '_')}_${videoId}`;
+    const mimeType = ext === 'webm' ? 'video/webm' : 'video/mp4';
+
+    returnData.push({
+      json: {
+        success: true,
+        videoId,
+        title: info.title,
+        author: info.uploader || info.channel,
+        lengthSeconds: String(info.duration || 0),
+        viewCount: String(info.view_count || 0),
+        downloadType: 'video',
+        fileSize: buffer.length,
+        format: ext,
+        proxyUsed: useProxy,
       },
-    },
-  });
+      binary: {
+        [filename]: {
+          data: buffer.toString('base64'),
+          mimeType,
+          fileExtension: ext,
+          fileName: `${filename}.${ext}`,
+        },
+      },
+    });
+
+    // Cleanup output file
+    try {
+      fs.unlinkSync(outputFile);
+    } catch {
+      // Ignore
+    }
+  } finally {
+    cleanupFlags(flags);
+  }
 }
 
 async function downloadAudio(
-  innertube: Innertube,
   context: IExecuteFunctions,
+  videoUrl: string,
   videoId: string,
   itemIndex: number,
   returnData: INodeExecutionData[],
 ): Promise<void> {
   const audioQuality = context.getNodeParameter('audioQuality', itemIndex) as string;
   const customFilename = context.getNodeParameter('outputFilename', itemIndex) as string;
-  const timeoutSeconds = context.getNodeParameter('timeoutSeconds', itemIndex, 300) as number;
   const useProxy = context.getNodeParameter('useProxy', itemIndex) as boolean;
 
-  const info = await innertube.getInfo(videoId);
-  const title = info.basic_info?.title || 'audio';
-  const filename =
-    customFilename || `${title.replace(/[^a-z0-9]/gi, '_')}_${videoId}_audio`;
+  const flags = await getCommonFlags(context, itemIndex);
+  const tmpBase = path.join(
+    os.tmpdir(),
+    `ytdl_audio_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+  );
 
-  const quality = audioQuality === 'lowest' ? 'bestefficiency' : 'best';
-  const stream = await innertube.download(videoId, { type: 'audio', quality } as any);
-  const buffer = await collectStreamWithTimeout(stream, timeoutSeconds * 1000);
-  const base64Data = buffer.toString('base64');
+  try {
+    // Get metadata first
+    const info = await youtubeDlExec(videoUrl, {
+      ...flags,
+      dumpSingleJson: true,
+      noDownload: true,
+    });
 
-  returnData.push({
-    json: {
-      success: true,
-      videoId,
-      title,
-      author: info.basic_info?.author || '',
-      lengthSeconds: String(info.basic_info?.duration || 0),
-      downloadType: 'audio',
-      fileSize: buffer.length,
-      proxyUsed: useProxy,
-    },
-    binary: {
-      [filename]: {
-        data: base64Data,
-        mimeType: 'audio/webm',
-        fileExtension: 'webm',
-        fileName: `${filename}.webm`,
+    // Build format string - download native audio (no ffmpeg needed)
+    const format = audioQuality === 'lowest' ? 'worstaudio' : 'bestaudio';
+
+    // Download
+    await youtubeDlExec(videoUrl, {
+      ...flags,
+      format,
+      output: `${tmpBase}.%(ext)s`,
+    });
+
+    // Find the output file
+    const outputFile = findOutputFile(tmpBase);
+    if (!outputFile) {
+      throw new Error('Audio download completed but output file not found');
+    }
+
+    const buffer = fs.readFileSync(outputFile);
+    const ext = path.extname(outputFile).slice(1) || 'webm';
+    const title = info.title || 'audio';
+    const filename =
+      customFilename || `${title.replace(/[^a-z0-9]/gi, '_')}_${videoId}_audio`;
+
+    // Determine MIME type from extension
+    let mimeType: string;
+    switch (ext) {
+      case 'm4a':
+        mimeType = 'audio/mp4';
+        break;
+      case 'opus':
+        mimeType = 'audio/opus';
+        break;
+      case 'mp3':
+        mimeType = 'audio/mpeg';
+        break;
+      default:
+        mimeType = 'audio/webm';
+    }
+
+    returnData.push({
+      json: {
+        success: true,
+        videoId,
+        title: info.title,
+        author: info.uploader || info.channel,
+        lengthSeconds: String(info.duration || 0),
+        downloadType: 'audio',
+        fileSize: buffer.length,
+        format: ext,
+        proxyUsed: useProxy,
       },
-    },
-  });
+      binary: {
+        [filename]: {
+          data: buffer.toString('base64'),
+          mimeType,
+          fileExtension: ext,
+          fileName: `${filename}.${ext}`,
+        },
+      },
+    });
+
+    // Cleanup
+    try {
+      fs.unlinkSync(outputFile);
+    } catch {
+      // Ignore
+    }
+  } finally {
+    cleanupFlags(flags);
+  }
 }
 
 async function getVideoInfo(
-  innertube: Innertube,
   context: IExecuteFunctions,
+  videoUrl: string,
   videoId: string,
   itemIndex: number,
   returnData: INodeExecutionData[],
 ): Promise<void> {
   const useProxy = context.getNodeParameter('useProxy', itemIndex) as boolean;
+  const flags = await getCommonFlags(context, itemIndex);
 
-  const info = await innertube.getInfo(videoId);
+  try {
+    const info = await youtubeDlExec(videoUrl, {
+      ...flags,
+      dumpSingleJson: true,
+      noDownload: true,
+    });
 
-  const allFormats = [
-    ...(info.streaming_data?.formats || []),
-    ...(info.streaming_data?.adaptive_formats || []),
-  ];
+    const formats = (info.formats || []).map((f: any) => ({
+      formatId: f.format_id,
+      formatNote: f.format_note,
+      ext: f.ext,
+      quality: f.quality,
+      resolution: f.resolution,
+      fps: f.fps,
+      hasVideo: f.vcodec !== 'none',
+      hasAudio: f.acodec !== 'none',
+      videoCodec: f.vcodec,
+      audioCodec: f.acodec,
+      bitrate: f.tbr,
+      videoBitrate: f.vbr,
+      audioBitrate: f.abr,
+      width: f.width,
+      height: f.height,
+      filesize: f.filesize || f.filesize_approx,
+    }));
 
-  const formats = allFormats.map((format: any) => ({
-    itag: format.itag,
-    quality: format.quality,
-    qualityLabel: format.quality_label,
-    mimeType: format.mime_type,
-    hasVideo: format.has_video,
-    hasAudio: format.has_audio,
-    bitrate: format.bitrate,
-    fps: format.fps,
-    width: format.width,
-    height: format.height,
-    contentLength: format.content_length,
-  }));
-
-  returnData.push({
-    json: {
-      success: true,
-      videoId,
-      title: info.basic_info?.title,
-      description: info.basic_info?.short_description,
-      lengthSeconds: String(info.basic_info?.duration || 0),
-      viewCount: String(info.basic_info?.view_count || 0),
-      author: {
-        name: info.basic_info?.author,
-        channelUrl: info.basic_info?.channel?.url,
+    returnData.push({
+      json: {
+        success: true,
+        videoId,
+        title: info.title,
+        description: info.description,
+        lengthSeconds: String(info.duration || 0),
+        viewCount: String(info.view_count || 0),
+        uploadDate: info.upload_date,
+        author: {
+          name: info.uploader || info.channel,
+          channelUrl: info.channel_url || info.uploader_url,
+          subscriberCount: info.channel_follower_count,
+        },
+        thumbnails: info.thumbnails,
+        formats,
+        category: info.categories?.[0],
+        keywords: info.tags,
+        isLive: info.is_live || false,
+        videoUrl: info.webpage_url,
+        proxyUsed: useProxy,
       },
-      thumbnails: info.basic_info?.thumbnail,
-      formats,
-      keywords: info.basic_info?.keywords,
-      isLive: info.basic_info?.is_live,
-      videoUrl: `https://www.youtube.com/watch?v=${videoId}`,
-      proxyUsed: useProxy,
-    },
-  });
+    });
+  } finally {
+    cleanupFlags(flags);
+  }
 }
+
+// ──────────────────────────────────────────────────────────────
+// Node class
+// ──────────────────────────────────────────────────────────────
 
 export class YouTubeDL implements INodeType {
   description: INodeTypeDescription = {
@@ -281,7 +379,7 @@ export class YouTubeDL implements INodeType {
     group: ['transform'],
     version: 1,
     subtitle: '={{$parameter["operation"]}}',
-    description: 'Download YouTube videos and audio using pure JavaScript',
+    description: 'Download YouTube videos and audio using yt-dlp (requires Python 3.9+)',
     defaults: {
       name: 'YouTube Downloader',
     },
@@ -346,22 +444,6 @@ export class YouTubeDL implements INodeType {
         },
       },
       {
-        displayName: 'Filter',
-        name: 'videoFilter',
-        type: 'options',
-        options: [
-          { name: 'Video + Audio', value: 'audioandvideo' },
-          { name: 'Video Only', value: 'videoonly' },
-          { name: 'Audio Only', value: 'audioonly' },
-        ],
-        default: 'audioandvideo',
-        displayOptions: {
-          show: {
-            operation: ['downloadVideo'],
-          },
-        },
-      },
-      {
         displayName: 'Audio Quality',
         name: 'audioQuality',
         type: 'options',
@@ -385,18 +467,6 @@ export class YouTubeDL implements INodeType {
         description: 'Custom filename (optional, extension auto-added)',
       },
       {
-        displayName: 'Timeout (Seconds)',
-        name: 'timeoutSeconds',
-        type: 'number',
-        default: 300,
-        description: 'Maximum time in seconds to wait for the download to complete',
-        displayOptions: {
-          show: {
-            operation: ['downloadVideo', 'downloadAudio'],
-          },
-        },
-      },
-      {
         displayName: 'Proxy',
         name: 'useProxy',
         type: 'boolean',
@@ -408,8 +478,8 @@ export class YouTubeDL implements INodeType {
         name: 'proxyUrl',
         type: 'string',
         default: '',
-        placeholder: 'http://user:pass@proxy:port',
-        description: 'Proxy URL (supports HTTP and HTTPS proxies)',
+        placeholder: 'http://user:pass@proxy:port or socks5://proxy:port',
+        description: 'Proxy URL (supports HTTP, HTTPS, and SOCKS5)',
         displayOptions: {
           show: {
             useProxy: [true],
@@ -424,40 +494,38 @@ export class YouTubeDL implements INodeType {
     const returnData: INodeExecutionData[] = [];
     const operation = this.getNodeParameter('operation', 0) as string;
 
-    // Create Innertube client once for all items
-    const innertube = await createInnertubeClient(this);
-
     for (let i = 0; i < items.length; i++) {
       try {
-        const videoUrl = this.getNodeParameter('videoUrl', i) as string;
+        const rawUrl = this.getNodeParameter('videoUrl', i) as string;
 
-        if (!videoUrl) {
+        if (!rawUrl) {
           throw new NodeOperationError(this.getNode(), 'Video URL is required', {
             itemIndex: i,
           });
         }
 
-        if (!isValidYouTubeInput(videoUrl)) {
+        if (!isValidYouTubeInput(rawUrl)) {
           throw new NodeOperationError(
             this.getNode(),
-            `Invalid YouTube URL or video ID: ${videoUrl}`,
+            `Invalid YouTube URL or video ID: ${rawUrl}`,
             { itemIndex: i },
           );
         }
 
-        const videoId = extractVideoId(videoUrl);
+        const videoUrl = normalizeUrl(rawUrl);
+        const videoId = extractVideoId(rawUrl);
 
         switch (operation) {
           case 'downloadVideo':
-            await downloadVideo(innertube, this, videoId, i, returnData);
+            await downloadVideo(this, videoUrl, videoId, i, returnData);
             break;
 
           case 'downloadAudio':
-            await downloadAudio(innertube, this, videoId, i, returnData);
+            await downloadAudio(this, videoUrl, videoId, i, returnData);
             break;
 
           case 'getInfo':
-            await getVideoInfo(innertube, this, videoId, i, returnData);
+            await getVideoInfo(this, videoUrl, videoId, i, returnData);
             break;
 
           default:
@@ -467,15 +535,31 @@ export class YouTubeDL implements INodeType {
         }
       } catch (error: any) {
         if (this.continueOnFail()) {
+          const message = error.stderr || error.message || String(error);
           returnData.push({
             json: {
               success: false,
-              error: error.message,
+              error: message,
             },
           });
           continue;
         }
-        throw error;
+
+        // Provide helpful error for common issues
+        const msg = error.message || '';
+        if (msg.includes('ENOENT') || msg.includes('not found') || msg.includes('python')) {
+          throw new NodeOperationError(
+            this.getNode(),
+            'yt-dlp requires Python 3.9+ to be installed. For Docker: add "apk add python3" to your Dockerfile.',
+            { itemIndex: i },
+          );
+        }
+
+        throw new NodeOperationError(
+          this.getNode(),
+          `${operation} failed: ${error.stderr || error.message}`,
+          { itemIndex: i },
+        );
       }
     }
 
