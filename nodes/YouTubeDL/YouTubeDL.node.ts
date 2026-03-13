@@ -35,7 +35,7 @@ function normalizeUrl(input: string): string {
     return `https://www.youtube.com/watch?v=${trimmed}`;
   }
   // Add https:// if missing protocol
-  if (trimmed && !trimmed.match(/^https?:\/\//i)) {
+  if (trimmed && !/^https?:\/\//i.test(trimmed)) {
     return `https://${trimmed}`;
   }
   return trimmed;
@@ -144,6 +144,13 @@ function cleanup(...files: (string | undefined)[]) {
   }
 }
 
+function makeTmpBase(prefix: string): string {
+  return path.join(
+    os.tmpdir(),
+    `ytdl_${prefix}_${Date.now()}_${process.pid}_${Math.random().toString(36).slice(2, 8)}`,
+  );
+}
+
 /** Find the file yt-dlp wrote (it adds the extension via %(ext)s) */
 function findOutputFile(tmpBase: string): string | undefined {
   const dir = path.dirname(tmpBase);
@@ -153,40 +160,25 @@ function findOutputFile(tmpBase: string): string | undefined {
   return files.length > 0 ? path.join(dir, files[0]) : undefined;
 }
 
+const MIME_TYPES: Record<string, string> = {
+  mp4: 'video/mp4', webm: 'video/webm', mkv: 'video/x-matroska',
+  m4a: 'audio/mp4', opus: 'audio/opus', mp3: 'audio/mpeg',
+  ogg: 'audio/ogg', flac: 'audio/flac', wav: 'audio/wav',
+  srt: 'text/plain', vtt: 'text/vtt', ass: 'text/plain',
+  json: 'application/json',
+};
+
 function mimeFromExt(ext: string): string {
-  switch (ext) {
-    case 'mp4': return 'video/mp4';
-    case 'webm': return 'video/webm';
-    case 'mkv': return 'video/x-matroska';
-    case 'm4a': return 'audio/mp4';
-    case 'opus': return 'audio/opus';
-    case 'mp3': return 'audio/mpeg';
-    case 'ogg': return 'audio/ogg';
-    case 'flac': return 'audio/flac';
-    case 'wav': return 'audio/wav';
-    case 'srt': return 'text/plain';
-    case 'vtt': return 'text/vtt';
-    case 'ass': return 'text/plain';
-    case 'json': return 'application/json';
-    default: return 'application/octet-stream';
-  }
+  return MIME_TYPES[ext] || 'application/octet-stream';
 }
 
 // ── Format selection helper ─────────────────────────────────
 
 function buildFormatFlag(quality: string): string {
-  switch (quality) {
-    case '2160p': return 'bestvideo[height<=2160]+bestaudio/best[height<=2160]/best';
-    case '1440p': return 'bestvideo[height<=1440]+bestaudio/best[height<=1440]/best';
-    case '1080p': return 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best';
-    case '720p': return 'bestvideo[height<=720]+bestaudio/best[height<=720]/best';
-    case '480p': return 'bestvideo[height<=480]+bestaudio/best[height<=480]/best';
-    case '360p': return 'bestvideo[height<=360]+bestaudio/best[height<=360]/best';
-    case 'lowest': return 'worst[ext=mp4]/worst';
-    case 'highest':
-    default:
-      return 'best[ext=mp4]/best';
-  }
+  if (quality === 'lowest') return 'worst[ext=mp4]/worst';
+  const height = parseInt(quality, 10);
+  if (height) return `bestvideo[height<=${height}]+bestaudio/best[height<=${height}]/best`;
+  return 'best[ext=mp4]/best';
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -203,10 +195,7 @@ async function opDownloadVideo(
   const customFilename = context.getNodeParameter('outputFilename', itemIndex, '') as string;
   const { flags, cookieFile } = await buildExtraFlags(context, itemIndex);
 
-  const tmpBase = path.join(
-    os.tmpdir(),
-    `ytdl_v_${Date.now()}_${process.pid}_${Math.random().toString(36).slice(2, 8)}`,
-  );
+  const tmpBase = makeTmpBase('v');
   let outputFile: string | undefined;
 
   try {
@@ -260,10 +249,7 @@ async function opDownloadAudio(
   const customFilename = context.getNodeParameter('outputFilename', itemIndex, '') as string;
   const { flags, cookieFile } = await buildExtraFlags(context, itemIndex);
 
-  const tmpBase = path.join(
-    os.tmpdir(),
-    `ytdl_a_${Date.now()}_${process.pid}_${Math.random().toString(36).slice(2, 8)}`,
-  );
+  const tmpBase = makeTmpBase('a');
   let outputFile: string | undefined;
 
   try {
@@ -372,10 +358,7 @@ async function opGetTranscript(
   const subtitleLang = context.getNodeParameter('subtitleLanguage', itemIndex, 'en') as string;
   const { flags, cookieFile } = await buildExtraFlags(context, itemIndex);
 
-  const tmpBase = path.join(
-    os.tmpdir(),
-    `ytdl_t_${Date.now()}_${process.pid}_${Math.random().toString(36).slice(2, 8)}`,
-  );
+  const tmpBase = makeTmpBase('t');
 
   try {
     // Get metadata first
@@ -476,10 +459,7 @@ async function opDownloadSubtitles(
   const subtitleFormat = context.getNodeParameter('subtitleFormat', itemIndex, 'srt') as string;
   const { flags, cookieFile } = await buildExtraFlags(context, itemIndex);
 
-  const tmpBase = path.join(
-    os.tmpdir(),
-    `ytdl_s_${Date.now()}_${process.pid}_${Math.random().toString(36).slice(2, 8)}`,
-  );
+  const tmpBase = makeTmpBase('s');
 
   try {
     const info = await getInfo(videoUrl, flags);

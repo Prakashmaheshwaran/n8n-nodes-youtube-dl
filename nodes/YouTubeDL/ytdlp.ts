@@ -42,13 +42,13 @@ const MUSL_SHIM_AARCH64 = 'f0VMRgIBAQAAAAAAAAAAAAMAtwABAAAAAAAAAAAAAABAAAAAAAAAA
 // ── Candidate directories ───────────────────────────────────
 
 function getCandidateDirs(): string[] {
-  const dirs: string[] = [];
-  dirs.push(BIN_DIR);
   const n8nDir = process.env.N8N_USER_FOLDER || path.join(os.homedir(), '.n8n');
-  dirs.push(path.join(n8nDir, 'ytdlp'));
-  dirs.push(path.join(os.homedir(), '.local', 'bin'));
-  dirs.push(path.join(os.tmpdir(), 'ytdlp'));
-  return dirs;
+  return [
+    BIN_DIR,
+    path.join(n8nDir, 'ytdlp'),
+    path.join(os.homedir(), '.local', 'bin'),
+    path.join(os.tmpdir(), 'ytdlp'),
+  ];
 }
 
 // ── Platform detection ──────────────────────────────────────
